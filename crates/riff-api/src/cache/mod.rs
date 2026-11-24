@@ -1,5 +1,3 @@
-//! Caching layer: disk TTL, texture LRU, domain object LRU.
-
 use gdk::prelude::*;
 use gdk_pixbuf::prelude::PixbufLoaderExt;
 use serde::{Deserialize, Serialize};
@@ -13,7 +11,6 @@ pub use disk::DiskCache;
 pub use store::Store;
 pub use texture::TextureCache;
 
-/// Key identifying a cached resource.
 #[derive(Hash, Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub enum CacheKey {
     Album(String),
@@ -29,6 +26,7 @@ pub enum CacheKey {
     ArtistAlbums(String),
     UserPlaylists(String),
     TrackSaved(String),
+    Track(String),
 }
 
 impl CacheKey {
@@ -47,6 +45,7 @@ impl CacheKey {
             Self::ArtistAlbums(id) => format!("pg_artist_albums_{id}"),
             Self::UserPlaylists(id) => format!("pg_user_playlists_{id}"),
             Self::TrackSaved(id) => format!("track_saved_{id}"),
+            Self::Track(id) => format!("track_{id}"),
         }
     }
 }

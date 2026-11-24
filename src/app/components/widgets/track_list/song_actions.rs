@@ -1,6 +1,7 @@
 use gio::SimpleAction;
 
 use crate::app::models::Track;
+use crate::app::state::Action;
 use crate::app::state::{AppAction, EntryKey, PlaybackAction};
 use crate::app::Dispatcher;
 
@@ -22,15 +23,15 @@ impl SongActions for Track {
     fn make_queue_actions(&self, dispatcher: Dispatcher) -> Vec<SimpleAction> {
         let song = self.clone();
         vec![action("queue", move || {
-            dispatcher.dispatch(AppAction::QueueTracks {
-                tracks: vec![song.clone()],
-            });
+            dispatcher.dispatch(AppAction::Core(Action::QueueTracks(vec![song.clone()])));
         })]
     }
 
     fn make_queue_entry_actions(&self, key: EntryKey, dispatcher: Dispatcher) -> Vec<SimpleAction> {
+        let track_id = self.rri.id.clone();
         vec![action("dequeue", move || {
-            dispatcher.dispatch(PlaybackAction::RemoveEntries(vec![key]).into())
+            let entry = (key, track_id.clone());
+            dispatcher.dispatch(PlaybackAction::RemoveEntries(vec![entry]).into())
         })]
     }
 

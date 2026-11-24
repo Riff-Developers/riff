@@ -1,16 +1,12 @@
-// Widget for the "Liked Songs" (saved tracks) page.
-// Wraps a DetailsPageComponent and triggers initial data load on login.
-
 use std::rc::Rc;
 
 use super::SavedTracksModel;
 use crate::app::components::{
     Component, DetailsPageComponent, EventListener, HasHeaderBarModel, PageHeader,
 };
-use crate::app::state::LoginEvent;
+use crate::app::state::SessionStatus;
 use crate::app::AppEvent;
 
-/// GTK widget for the saved tracks (liked songs) detail page.
 pub struct SavedTracks {
     model: Rc<SavedTracksModel>,
     component: DetailsPageComponent<SavedTracksModel>,
@@ -37,7 +33,10 @@ impl Component for SavedTracks {
 
 impl EventListener for SavedTracks {
     fn on_event(&mut self, event: &AppEvent) {
-        if let AppEvent::LoginEvent(LoginEvent::LoginCompleted) = event {
+        if event
+            .session()
+            .is_some_and(|s| s.became(&SessionStatus::LoggedIn))
+        {
             self.model.load_initial();
         }
         self.component.handle_event(event);

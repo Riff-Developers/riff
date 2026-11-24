@@ -1,16 +1,9 @@
-// Domain models
 mod main;
 pub use main::*;
 
-// Playback queue conversions
-mod queue;
-pub use queue::*;
-
-// Shared enums (used by UI, state, and settings)
 mod card_enums;
 pub use card_enums::*;
 
-// UI models (GObject)
 mod songs;
 pub use songs::*;
 
@@ -63,15 +56,6 @@ impl From<&Playlist> for CardModel {
             card.set_owner(owner.rri.id.clone());
         }
         card
-    }
-}
-
-impl From<Playlist> for PlaylistSummary {
-    fn from(playlist: Playlist) -> Self {
-        Self {
-            id: playlist.rri.id,
-            title: playlist.title,
-        }
     }
 }
 

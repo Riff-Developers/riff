@@ -13,7 +13,7 @@ use crate::app::models::{CardLayout, CardModel, CardSize};
 use riff_api::models::is_resource_url;
 use riff_api::ApiService;
 
-use crate::app::load;
+use riff_core::load;
 use std::sync::Arc;
 
 use gtk::prelude::*;

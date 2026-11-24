@@ -12,7 +12,7 @@ insecure-tls = []
 
 [dependencies]
 riff-auth = { path = "../riff-auth" }
-riff-config = { path = "../riff-config" }
+riff-config = { path = "../riff-config", default-features = false }
 spotify-api = { path = "../../generated/spotify-api" }
 
 serde_json = "1.0.96"
@@ -53,3 +53,6 @@ version = "1"
 # `test-util` gives the scheduler tests a paused clock, so their ordering does
 # not depend on real timing.
 features = ["test-util"]
+
+[lints]
+workspace = true

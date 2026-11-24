@@ -3,8 +3,6 @@ use glib::clone::{Downgrade, Upgrade};
 use std::iter::Iterator;
 use std::marker::PhantomData;
 
-// A wrapper around a GIO ListStore
-// DEPRECATED
 pub struct ListStore<GType> {
     store: gio::ListStore,
     _marker: PhantomData<GType>,
@@ -30,27 +28,9 @@ where
         &self.store
     }
 
-    pub fn prepend(&mut self, elements: impl Iterator<Item = GType>) {
-        let upcast_vec: Vec<glib::Object> = elements.map(|e| e.upcast::<glib::Object>()).collect();
-        self.store.splice(0, 0, &upcast_vec[..]);
-    }
-
-    pub fn extend(&mut self, elements: impl Iterator<Item = GType>) {
-        let upcast_vec: Vec<glib::Object> = elements.map(|e| e.upcast::<glib::Object>()).collect();
-        self.store.splice(self.store.n_items(), 0, &upcast_vec[..]);
-    }
-
     pub fn replace_all(&mut self, elements: impl Iterator<Item = GType>) {
         let upcast_vec: Vec<glib::Object> = elements.map(|e| e.upcast::<glib::Object>()).collect();
         self.store.splice(0, self.store.n_items(), &upcast_vec[..]);
-    }
-
-    pub fn insert(&mut self, position: u32, element: GType) {
-        self.store.insert(position, &element);
-    }
-
-    pub fn remove(&mut self, position: u32) {
-        self.store.remove(position);
     }
 
     pub fn get(&self, index: u32) -> GType {
@@ -69,20 +49,6 @@ where
 
     pub fn is_empty(&self) -> bool {
         self.store.n_items() == 0
-    }
-
-    // Quick and dirty comparison between the list store and a slice of object that can be compared
-    // with the contents of the store using some function F.
-    // Not so great but eh
-    pub fn eq<F, O>(&self, other: &[O], comparison: F) -> bool
-    where
-        F: Fn(&GType, &O) -> bool,
-    {
-        self.len() == other.len()
-            && self
-                .iter()
-                .zip(other.iter())
-                .all(|(left, right)| comparison(&left, right))
     }
 }
 

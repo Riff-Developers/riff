@@ -1,39 +1,10 @@
-//! The **audio engine**: a DSP pipeline that sits between librespot's decoder
-//! and the audio backend.
-//!
-//! librespot decodes audio into interleaved `f64` samples and hands them to a
-//! [`Sink`](librespot_playback::audio_backend::Sink). Instead of writing those
-//! samples straight to the backend, Riff routes them through a
-//! [`ProcessorChain`]: an ordered list of [`Processor`]s that can equalize, mix
-//! to mono, pitch-shift, and (eventually) mix in additional sources before the
-//! audio reaches the speakers.
-//!
-//! # Architecture
-//!
-//! ```text
-//! librespot decoder
-//!        │  AudioPacket::Samples
-//!        ▼
-//!   CaptureSink  ── implements librespot's Sink trait (the boundary)
-//!        │  AudioBuffer
-//!        ▼
-//!   ProcessorChain
-//!        │   EqProcessor → MonoProcessor → PanProcessor → PitchProcessor → MixProcessor
-//!        ▼
-//!   backend Sink (PulseAudio / ALSA)
-//! ```
-//!
-//! Each [`Processor`] operates in place on an [`AudioBuffer`]. Processors expose
-//! [`Processor::is_active`] so the chain can cheaply skip stages that would not
-//! change the audio (e.g. a flat EQ or disabled mono). Live configuration
-//! updates are delivered through per-processor *controllers* that use a
-//! lock-free generation counter, so the audio thread never blocks on the UI.
-
 #[macro_use]
 extern crate log;
 
 mod buffer;
 mod capture_sink;
+mod effects;
+mod effects_node;
 mod eq_processor;
 mod mix_processor;
 mod mono_processor;
@@ -42,6 +13,8 @@ mod pitch_processor;
 
 pub use buffer::AudioBuffer;
 pub use capture_sink::CaptureSink;
+pub use effects::Effects;
+pub use effects_node::{EffectsNode, NODE_NAME as EFFECTS_NODE_NAME};
 pub use eq_processor::{EqController, EqProcessor};
 pub use mix_processor::{MixController, MixProcessor};
 pub use mono_processor::{MonoController, MonoProcessor};

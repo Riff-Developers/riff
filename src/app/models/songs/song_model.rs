@@ -7,13 +7,7 @@ use std::{cell::Ref, ops::Deref};
 use crate::app::components::utils::format_duration;
 use crate::app::models::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum QueueRole {
-    Queued,
-    Context,
-    Current,
-    Fixed,
-}
+pub use riff_core::play_queue::QueueRole;
 
 // UI model for a song
 glib::wrapper! {

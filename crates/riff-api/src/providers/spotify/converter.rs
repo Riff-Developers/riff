@@ -1,5 +1,3 @@
-//! Conversions from generated Spotify types into provider-neutral [`crate::models`].
-
 use spotify_api::models as sp;
 
 use crate::defaults::{self, EntityKind};
@@ -396,88 +394,12 @@ pub(super) fn current_user_from_private(u: &sp::PrivateUserObject) -> User {
     }
 }
 
-pub(super) fn device_from_object(d: &sp::DeviceObject) -> Option<Device> {
-    if d.is_restricted.unwrap_or(false) {
-        return None;
-    }
-    let kind = match d.r#type.as_deref() {
-        Some("Smartphone") => DeviceKind::Phone,
-        Some("Computer") => DeviceKind::Computer,
-        Some("Speaker") => DeviceKind::Speaker,
-        Some("TV") | Some("CastVideo") => DeviceKind::Tv,
-        _ => DeviceKind::Other,
-    };
-    Some(Device {
-        id: d.id.clone().flatten().unwrap_or_default(),
-        label: d.name.clone().unwrap_or_default(),
-        kind,
-        is_active: d.is_active.unwrap_or(false),
-        volume_percent: None,
-    })
-}
-
-pub(super) fn player_state_from_object(s: &sp::CurrentlyPlayingContextObject) -> PlayerState {
-    let current_track_id = s
-        .item
-        .as_ref()
-        .and_then(|item| match item.as_ref() {
-            sp::QueueObjectCurrentlyPlaying::Track(t) => t.id.clone(),
-            _ => None,
-        })
-        .map(rid);
-    let repeat = match s.repeat_state.as_deref() {
-        Some("track") => RepeatMode::Track,
-        Some("context") => RepeatMode::Context,
-        _ => RepeatMode::Off,
-    };
-    PlayerState {
-        is_playing: s.is_playing.unwrap_or(false),
-        current_track_id,
-        progress_ms: s.progress_ms.unwrap_or(0) as u32,
-        repeat,
-        shuffle: s.shuffle_state.unwrap_or(false),
-        device: None,
-    }
-}
-
-pub(super) fn repeat_mode_str(mode: RepeatMode) -> &'static str {
-    match mode {
-        RepeatMode::Track => "track",
-        RepeatMode::Context => "context",
-        RepeatMode::Off => "off",
-    }
-}
-
 pub(super) fn search_type_str(kind: SearchType) -> &'static str {
     match kind {
         SearchType::Artist => "artist",
         SearchType::Album => "album",
         SearchType::Playlist => "playlist",
         SearchType::Track => "track",
-    }
-}
-
-pub(super) fn queue_from_object(q: &sp::QueueObject) -> Queue {
-    let currently_playing = q
-        .currently_playing
-        .as_ref()
-        .and_then(|cp| match cp.as_ref() {
-            sp::QueueObjectCurrentlyPlaying::Track(t) => track_from_object(t),
-            _ => None,
-        });
-    let items = q
-        .queue
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|item| match item {
-            sp::QueueObjectQueueInner::Track(t) => track_from_object(t),
-            _ => None,
-        })
-        .collect();
-    Queue {
-        currently_playing,
-        items,
     }
 }
 
@@ -546,16 +468,6 @@ mod tests {
             unescape_html("R&B; &nope; &#zz; a & b &"),
             "R&B; &nope; &#zz; a & b &"
         );
-    }
-
-    #[test]
-    fn empty_queue_converts_to_empty() {
-        let q = queue_from_object(&sp::QueueObject {
-            currently_playing: None,
-            queue: None,
-        });
-        assert!(q.currently_playing.is_none());
-        assert!(q.items.is_empty());
     }
 
     #[test]
@@ -629,8 +541,6 @@ mod tests {
 
     #[test]
     fn local_files_in_a_playlist_page_become_unplayable_rows() {
-        // A local file's placeholder album, as the playlist items endpoint
-        // returns it: no id, type, release date or track count.
         let page = r#"{"href":"","limit":50,"next":null,"offset":0,"previous":null,"total":1,
             "items":[{"added_at":"2020-01-01T00:00:00Z","is_local":true,"track":{"type":"track",
             "album":{"album_type":null,"artists":[],"available_markets":[],"external_urls":{},

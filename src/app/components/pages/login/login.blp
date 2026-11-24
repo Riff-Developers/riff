@@ -1,148 +1,375 @@
 using Gtk 4.0;
 using Adw 1;
 
-
 template $LoginWindow : Adw.Window {
-  default-width: 360;
-  default-height: 100;
+  resizable: false;
+  default-width: 552;
 
   styles ["login-window"]
 
-  Box {
-    hexpand: true;
-    margin-bottom: 24;
-    orientation: vertical;
+  Adw.ToastOverlay toast_overlay {
+    Box layout {
+      hexpand: true;
+      margin-bottom: 24;
+      orientation: vertical;
 
-    Adw.HeaderBar {
-      [title]
-      Label {}
+      Adw.HeaderBar header {
+        [start]
+        Button back_button {
+          icon-name: "go-previous-symbolic";
+          /* Translators: Tooltip of the button that goes back to choosing how to log in */
+          tooltip-text: _("Back");
+          visible: false;
+        }
 
-      styles ["flat"]
-    }
+        [title]
+        Label {}
 
-    WindowHandle {
+        [end]
+        Button about_button {
+          icon-name: "help-about-symbolic";
+          /* Translators: Tooltip of the button that opens the About dialog */
+          tooltip-text: _("About Riff");
+          visible: false;
+        }
 
-      Adw.Clamp {
-        maximum-size: 360;
-        tightening-threshold: 280;
+        styles ["flat"]
+      }
 
-        Box {
-          hexpand: true;
-          orientation: vertical;
-          margin-start: 16;
-          margin-end: 16;
-          spacing: 24;
+      WindowHandle {
+        vexpand: true;
 
-          Image {
-            icon-name: "dev.diegovsky.Riff";
-            pixel-size: 128;
-            margin-bottom: 12;
-          }
+        Adw.Clamp {
+          maximum-size: 512;
+          tightening-threshold: 280;
 
-          Box {
-            hexpand: true;
-            orientation: vertical;
-            spacing: 4;
-
-            Label {
-              label: _("Welcome to Riff");
-              halign: center;
-              styles ["title-1"]
-            }
-
-            Label {
-              /* Translators: Login window subtitle */
-              label: _("Log in with your Spotify Account");
-              wrap: true;
-              wrap-mode: word;
-              halign: center;
-              justify: center;
-              styles ["body"]
-            }
-          }
-
-          /* Status area: shows either the premium notice or an auth error, never both */
-          Stack status_stack {
-            transition-type: crossfade;
-            transition-duration: 200;
+          Stack pages {
+            transition-type: slide_left_right;
+            vhomogeneous: true;
 
             StackPage {
-              name: "notice";
-              child: Box {
-                orientation: horizontal;
+              name: "loading";
+              child: Box loading_slot {
+                width-request: 128;
+                height-request: 128;
                 halign: center;
-                spacing: 8;
+                valign: center;
 
-                Image {
+                accessibility {
+                  /* Translators: Read out while the app starts */
+                  label: _("Loading");
+                }
+              };
+            }
+
+            StackPage {
+              name: "choose";
+              child: Box {
+                hexpand: true;
+                orientation: vertical;
+                margin-start: 16;
+                margin-end: 16;
+                spacing: 24;
+
+                Box welcome_logo_slot {
+                  width-request: 128;
+                  height-request: 128;
+                  halign: center;
+                  margin-bottom: 12;
+                }
+
+                Box welcome_content {
+                  orientation: vertical;
+                  spacing: 24;
+
+                  Box {
+                    hexpand: true;
+                    orientation: vertical;
+                    spacing: 4;
+
+                    Label {
+                      label: _("Welcome to Riff");
+                      halign: center;
+                      styles ["title-1"]
+                    }
+                  }
+
+                  Box {
+                    orientation: horizontal;
+                    halign: center;
+                    spacing: 8;
+
+                    Image {
+                      icon-name: "dialog-warning-symbolic";
+                      pixel-size: 16;
+                      valign: center;
+                      styles ["warning"]
+                    }
+
+                    Label {
+                      /* Translators: Premium requirement notice shown on the login page. */
+                      label: _("A Spotify Premium subscription is required.");
+                      styles ["caption", "warning"]
+                    }
+                  }
+
+                  Box welcome_buttons {
+                    orientation: vertical;
+                    halign: center;
+                    spacing: 12;
+
+                    Button login_with_soloist_button {
+                      /* Translators: Log in button label. Soloist is the name of the service's own player that plays on this computer. */
+                      label: _("Log In with Soloist");
+                      styles ["pill", "suggested-action"]
+                    }
+
+                    Button login_with_librespot_button {
+                      /* Translators: Log in button label. Librespot is the name of the open-source player that plays on this computer. */
+                      label: _("Log In with Librespot");
+                      styles ["pill"]
+                    }
+                  }
+                }
+              };
+            }
+
+            StackPage {
+              name: "auth";
+              child: Box {
+                orientation: vertical;
+                valign: center;
+                margin-start: 16;
+                margin-end: 16;
+                spacing: 36;
+
+                Box {
+                  orientation: vertical;
+                  spacing: 26;
+
+                  Label {
+                    /* Translators: Title of the page that signs in through the browser */
+                    label: _("Authentication");
+                    halign: center;
+                    styles ["title-1"]
+                  }
+
+                  Label {
+                    label: _("Click the button below and follow the steps in your browser");
+                    wrap: true;
+                    wrap-mode: word;
+                    max-width-chars: 40;
+                    justify: center;
+                    halign: center;
+                    styles ["body"]
+                  }
+                }
+
+                Button auth_continue_button {
+                  halign: center;
+                  /* Translators: Tooltip of the button that opens the sign-in page */
+                  tooltip-text: _("Opens in your browser");
+                  styles ["pill", "suggested-action"]
+
+                  child: Box {
+                    spacing: 6;
+                    halign: center;
+
+                    Label {
+                      /* Translators: Button that opens the sign-in page in the browser */
+                      label: _("Continue");
+                    }
+
+                    Image {
+                      icon-name: "adw-external-link-symbolic";
+                      accessible-role: presentation;
+                    }
+                  };
+                }
+              };
+            }
+
+            StackPage {
+              name: "key";
+              child: Box {
+                orientation: vertical;
+                valign: center;
+                margin-start: 16;
+                margin-end: 16;
+                spacing: 36;
+
+                Box {
+                  orientation: vertical;
+                  spacing: 26;
+
+                  Label {
+                    label: _("Your API Key");
+                    halign: center;
+                    styles ["title-1"]
+                  }
+
+                  Label key_body {
+                    use-markup: true;
+                    wrap: true;
+                    wrap-mode: word;
+                    max-width-chars: 40;
+                    justify: center;
+                    halign: center;
+                    styles ["body"]
+                  }
+                }
+
+                Box {
+                  orientation: vertical;
+                  spacing: 36;
+
+                  PasswordEntry key_entry {
+                    show-peek-icon: true;
+                    placeholder-text: _("API key");
+                    activates-default: true;
+                  }
+
+                  Button key_continue_button {
+                    label: _("Continue");
+                    halign: center;
+                    sensitive: false;
+                    styles ["pill", "suggested-action"]
+                  }
+                }
+              };
+            }
+
+            StackPage {
+              name: "setup";
+              child: Box {
+                orientation: vertical;
+                valign: center;
+                margin-start: 16;
+                margin-end: 16;
+                spacing: 36;
+
+                $RiffSpinningLogo setup_logo {
+                  pixel-size: 128;
+                  halign: center;
+                  margin-bottom: 12;
+                }
+
+                Image setup_problem_icon {
                   icon-name: "dialog-warning-symbolic";
-                  pixel-size: 16;
-                  valign: center;
+                  pixel-size: 64;
+                  margin-bottom: 12;
+                  visible: false;
                   styles ["warning"]
                 }
 
-                Label {
-                  /* Translators: Premium requirement notice shown on the login page. */
-                  label: _("A Spotify Premium subscription is required.");
-                  styles ["caption", "warning"]
+                Box {
+                  orientation: vertical;
+                  spacing: 26;
+
+                  Label setup_title {
+                    halign: center;
+                    wrap: true;
+                    justify: center;
+                    styles ["title-1"]
+                  }
+
+                  Label setup_body {
+                    wrap: true;
+                    wrap-mode: word;
+                    max-width-chars: 40;
+                    justify: center;
+                    halign: center;
+                    styles ["body"]
+                  }
+                }
+
+                Box setup_guide {
+                  orientation: vertical;
+                  spacing: 12;
+                  halign: center;
+                  visible: false;
+
+                  Adw.InlineViewSwitcher {
+                    stack: setup_guide_stack;
+                    halign: center;
+                  }
+
+                  Adw.ViewStack setup_guide_stack {
+                    Adw.ViewStackPage {
+                      name: "desktop";
+                      /* Translators: Tab showing how it's done in the app on a computer */
+                      title: _("Desktop");
+                      icon-name: "computer-symbolic";
+
+                      child: Overlay {
+                        width-request: 480;
+                        height-request: 324;
+                        styles ["guide"]
+
+                        child: Picture setup_guide_desktop {
+                          content-fit: contain;
+                          can-shrink: true;
+                        };
+
+                        [overlay]
+                        Button setup_guide_desktop_expand {
+                          icon-name: "view-fullscreen-symbolic";
+                          /* Translators: Tooltip of the button that shows the setup video larger */
+                          tooltip-text: _("Expand");
+                          halign: center;
+                          valign: center;
+                          styles ["osd", "circular", "guide-expand"]
+                        }
+                      };
+                    }
+
+                    Adw.ViewStackPage {
+                      name: "mobile";
+                      /* Translators: Tab showing how it's done in the app on a phone */
+                      title: _("Mobile");
+                      icon-name: "phone-symbolic";
+
+                      child: Overlay {
+                        width-request: 480;
+                        height-request: 324;
+                        styles ["guide"]
+
+                        child: Picture setup_guide_mobile {
+                          content-fit: contain;
+                          can-shrink: true;
+                        };
+
+                        [overlay]
+                        Button setup_guide_mobile_expand {
+                          icon-name: "view-fullscreen-symbolic";
+                          /* Translators: Tooltip of the button that shows the setup video larger */
+                          tooltip-text: _("Expand");
+                          halign: center;
+                          valign: center;
+                          styles ["osd", "circular", "guide-expand"]
+                        }
+                      };
+                    }
+                  }
+                }
+
+                Button setup_report_button {
+                  /* Translators: Opens a bug report on the project's tracker */
+                  label: _("Report a Bug");
+                  halign: center;
+                  visible: false;
+                  styles ["pill", "suggested-action"]
                 }
               };
             }
-
-            StackPage {
-              name: "error";
-              child: Box {
-                orientation: horizontal;
-                halign: center;
-                spacing: 8;
-
-                Image {
-                  icon-name: "dialog-warning-symbolic";
-                  pixel-size: 16;
-                  valign: center;
-                  styles ["error"]
-                }
-
-                Label {
-                  /* Translators: This error is shown when a non-premium account is detected. */
-                  label: _("Your account does not have a Spotify Premium subscription.");
-                  styles ["caption", "error"]
-                }
-              };
-            }
-
-            StackPage {
-              name: "login_error";
-              child: Box {
-                orientation: horizontal;
-                halign: center;
-                spacing: 8;
-
-                Image {
-                  icon-name: "dialog-error-symbolic";
-                  pixel-size: 16;
-                  valign: center;
-                  styles ["error"]
-                }
-
-                Label {
-                  /* Translators: This error is shown when login fails. Browser extensions such as ad or privacy blockers can break the login page. */
-                  label: _("Login failed. Please check your connection and browser extensions before trying again.");
-                  wrap: true;
-                  wrap-mode: word_char;
-                  styles ["caption", "error"]
-                }
-              };
-            }
-          }
-
-          Button login_with_spotify_button {
-            /* Translators: Log in button label */
-            label: _("Log in with Spotify…");
-            halign: center;
-            styles ["pill", "suggested-action"]
           }
         }
       }
     }
   }
+}
+
+SizeGroup {
+  mode: horizontal;
+  widgets [welcome_buttons, auth_continue_button, key_continue_button, setup_report_button]
 }

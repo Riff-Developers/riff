@@ -9,14 +9,6 @@ pub enum HomePage {
 }
 
 impl HomePage {
-    pub const ALL: [HomePage; 5] = [
-        Self::Library,
-        Self::SavedTracks,
-        Self::SavedPlaylists,
-        Self::SavedArtists,
-        Self::NowPlaying,
-    ];
-
     pub fn id(self) -> &'static str {
         match self {
             Self::Library => "library",
@@ -25,10 +17,6 @@ impl HomePage {
             Self::SavedArtists => "saved_artists",
             Self::NowPlaying => "now_playing",
         }
-    }
-
-    pub fn from_id(id: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|page| page.id() == id)
     }
 }
 
@@ -89,13 +77,5 @@ mod tests {
         assert!(!Route::Album(String::new()).is_valid());
         assert!(Route::Album("a".into()).is_valid());
         assert!(Route::Search.is_valid());
-    }
-
-    #[test]
-    fn home_page_ids_round_trip() {
-        for page in HomePage::ALL {
-            assert_eq!(HomePage::from_id(page.id()), Some(page));
-        }
-        assert_eq!(HomePage::from_id("nope"), None);
     }
 }

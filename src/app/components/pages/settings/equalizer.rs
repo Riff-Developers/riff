@@ -5,21 +5,7 @@ use gtk::CompositeTemplate;
 
 use super::lock_button;
 
-use riff_config::settings::SETTINGS;
-
-/// GSettings keys for the ten EQ bands, in ascending frequency order.
-const EQ_BAND_KEYS: [&str; 10] = [
-    "eq-band-0",
-    "eq-band-1",
-    "eq-band-2",
-    "eq-band-3",
-    "eq-band-4",
-    "eq-band-5",
-    "eq-band-6",
-    "eq-band-7",
-    "eq-band-8",
-    "eq-band-9",
-];
+use riff_config::{Setting, SettingsStore};
 
 mod imp {
     use super::*;
@@ -127,18 +113,13 @@ impl EqualizerWidget {
     }
 
     fn bind_settings(&self) {
-        let settings = gio::Settings::new(SETTINGS);
+        let settings = SettingsStore::new();
 
-        // Bind each band's adjustment one-way to avoid the bidirectional
-        // feedback loop that reverts single scale steps.
-        for (key, scale) in EQ_BAND_KEYS.iter().zip(self.band_scales()) {
+        for (band, scale) in Setting::EQ_BANDS.iter().copied().zip(self.band_scales()) {
             let adjustment = scale.adjustment();
-            adjustment.set_value(settings.double(key));
-            // The scale's own value label is too wide for ten bands to fit a
-            // narrow window, so the value is shown in the label below it.
+            adjustment.set_value(settings.double(band));
             if let Some(value) = scale.next_sibling().and_downcast::<gtk::Inscription>() {
                 let show = move |adj: &gtk::Adjustment| {
-                    // `+ 0.0` turns a rounded "-0.0" into "0.0".
                     let gain = (adj.value() * 10.0).round() / 10.0 + 0.0;
                     value.set_text(Some(&format!("{gain:.1}")));
                 };
@@ -146,9 +127,8 @@ impl EqualizerWidget {
                 adjustment.connect_value_changed(show);
             }
             let settings = settings.clone();
-            let key = key.to_string();
             adjustment.connect_value_changed(move |adj| {
-                let _ = settings.set_double(&key, adj.value());
+                let _ = settings.set_double(band, adj.value());
             });
         }
     }

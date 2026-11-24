@@ -1,28 +1,24 @@
-// Model for the album detail page.
-// Handles album metadata, track pagination, save/unsave (like), playback,
-// and artist navigation. On 400/404 from the API, navigates back.
-
+use std::cell::Ref;
 use std::ops::Deref;
 use std::rc::Rc;
 
 use crate::app::components::DetailsPageModel;
 use crate::app::components::{
-    dispatch_api_call, dispatch_api_read, dispatch_api_read_with_fallback, labels,
-    HasHeaderBarModel, HeaderImageShape, PageModel, PinnedPageModel, TrackListModel,
+    dispatch_api_call, labels, HasHeaderBarModel, HeaderImageShape, PageModel, PinnedPageModel,
+    ScreenModel, TrackListModel,
 };
 use crate::app::models::*;
-use crate::app::state::Route;
-use crate::app::state::SelectionContext;
-use crate::app::state::CARD_BATCH_SIZE;
-use crate::app::state::{BrowserAction, BrowserEvent, SelectionState};
-use crate::app::{AppAction, AppEvent, AppModel, Dispatcher, PaginationTarget, SongsSource};
-use crate::settings;
+use crate::app::state::PinKind;
+use crate::app::state::{ItemId, PageFields, Route, SelectionContext, SelectionState, PAGE_SIZE};
+use crate::app::{AppAction, AppEvent, AppModel, Dispatcher, SongsSource};
 use crate::{impl_source_page, impl_source_track_list, impl_track_list_model_base};
-use riff_api::DomainError;
+use riff_core::library;
+use riff_core::screens::AlbumScreen;
 
-/// Data model for the album detail page. Composes `DetailsPageModel` via Deref.
 pub struct DetailsModel {
     base: DetailsPageModel,
+    screen: ScreenModel<AlbumScreen>,
+    songs: SongListModel,
 }
 
 impl Deref for DetailsModel {
@@ -36,15 +32,28 @@ impl HasHeaderBarModel for DetailsModel {}
 
 impl DetailsModel {
     pub fn new(id: String, app_model: Rc<AppModel>, dispatcher: Dispatcher) -> Self {
+        let base = DetailsPageModel::new(id.clone(), Rc::clone(&app_model), dispatcher.clone());
+        let songs = SongListModel::new(PAGE_SIZE as u32);
+        let rows = songs.clone();
+        let screen = ScreenModel::new(
+            AlbumScreen::new(id, base.liked.clone()),
+            &app_model,
+            dispatcher,
+            move |screen, changed| {
+                if changed.contains(PageFields::TRACKS) {
+                    rows.clone().sync_pages(&screen.tracks);
+                }
+            },
+        );
         Self {
-            base: DetailsPageModel::new(id, app_model, dispatcher),
+            base,
+            screen,
+            songs,
         }
     }
 
-    /// Returns the album metadata from browser state, if loaded.
     pub fn get_album_info(&self) -> Option<impl Deref<Target = Album> + '_> {
-        self.app_model
-            .map_state_opt(|s| s.browser.details_state(&self.id)?.album.as_ref())
+        Ref::filter_map(self.screen.get(), |s| s.album.as_ref()).ok()
     }
 }
 
@@ -80,80 +89,15 @@ impl PageModel for DetailsModel {
     }
 
     fn load_page_info(&self) {
-        let api = self.app_model.api();
-
-        // Album metadata: drives the header and the release-details dialog.
-        // A 400/404 means the album does not exist, so leave it.
-        let id = self.id.clone();
-        let info_api = api.clone();
-        dispatch_api_read(&self.dispatcher, move |tag| async move {
-            match info_api.get_album(&id, tag).await {
-                Ok(album) => Ok(BrowserAction::SetAlbumInfo(Box::new(album)).into()),
-                Err(DomainError::ClientError { status: 400, .. })
-                | Err(DomainError::NotFound { .. }) => {
-                    Ok(BrowserAction::NavigationLeave(Route::Album(id)).into())
-                }
-                Err(e) => Err(e),
-            }
-        });
-
-        // Initial track page: populates the song list independently of the
-        // album metadata.
-        let id = self.id.clone();
-        let tracks_api = api.clone();
-        dispatch_api_read(&self.dispatcher, move |tag| async move {
-            tracks_api
-                .get_album_tracks(&id, 0, CARD_BATCH_SIZE, tag)
-                .await
-                .map(|batch| BrowserAction::SetAlbumTracks(id, Box::new(batch)).into())
-        });
-
-        // Liked status: a failure here must not blank the page, so it is
-        // swallowed to "not liked" rather than surfaced as an error.
-        let id = self.id.clone();
-        dispatch_api_read(&self.dispatcher, move |tag| async move {
-            let is_liked = api.check_saved_album(&id, tag).await.unwrap_or(false);
-            Ok(BrowserAction::SetAlbumLikedStatus(id, is_liked).into())
-        });
+        self.screen.open();
     }
 
     fn load_more(&self) {
-        let api = self.app_model.api();
-        let state = self.app_model.get_state();
-        let Some(next_page) = state
-            .browser
-            .details_state(&self.id)
-            .map(|s| s.next_tracks_page.clone())
-        else {
-            return;
-        };
-        drop(state);
+        self.screen.load_more();
+    }
 
-        let Some(offset) = next_page.next_offset else {
-            return;
-        };
-        let id = self.id.clone();
-        let batch_size = next_page.batch_size;
-
-        self.app_model.update_state(
-            BrowserAction::ConsumeNextPage(PaginationTarget::AlbumTracks(id.clone())).into(),
-        );
-
-        let restore_target = PaginationTarget::AlbumTracks(id.clone());
-        dispatch_api_read_with_fallback(
-            &self.dispatcher,
-            move |tag| {
-                let id = id.clone();
-                async move {
-                    api.get_album_tracks(&id, offset, batch_size, tag)
-                        .await
-                        .map(|song_batch| {
-                            BrowserAction::AppendAlbumTracks(id, Box::new(song_batch)).into()
-                        })
-                }
-            },
-            move || BrowserAction::PageRequestFailed(restore_target.clone(), offset).into(),
-        );
+    fn apply_event(&self, event: &AppEvent) {
+        self.screen.apply(event);
     }
 
     fn is_loaded(&self) -> bool {
@@ -175,12 +119,7 @@ impl PageModel for DetailsModel {
     }
 
     fn is_liked(&self) -> bool {
-        self.app_model
-            .get_state()
-            .browser
-            .details_state(&self.id)
-            .map(|s| s.is_liked)
-            .unwrap_or(false)
+        self.screen.get().saved
     }
 
     fn toggle_like(&self) {
@@ -194,15 +133,9 @@ impl PageModel for DetailsModel {
         let is_liked = self.is_liked();
         let api = self.app_model.api();
         dispatch_api_call(&self.dispatcher, move || async move {
-            if !is_liked {
-                api.save_albums(&id)
-                    .await
-                    .map(|_| BrowserAction::SaveAlbum(Box::new(album)).into())
-            } else {
-                api.remove_albums(&id)
-                    .await
-                    .map(|_| BrowserAction::UnsaveAlbum(id).into())
-            }
+            Ok(library::set_saved(&api, ItemId::Album(id), !is_liked)
+                .await?
+                .into())
         });
     }
 
@@ -218,20 +151,23 @@ impl PageModel for DetailsModel {
     }
 
     fn should_refresh_details(&self, event: &AppEvent) -> bool {
-        matches!(event, AppEvent::BrowserEvent(BrowserEvent::AlbumDetailsLoaded(id)) if id == &self.id)
+        event
+            .page_loaded(&Route::Album(self.id.clone()))
+            .is_some_and(|loaded| loaded.contains(PageFields::INFO))
     }
 
     fn should_refresh_liked(&self, event: &AppEvent) -> bool {
-        matches!(event,
-            AppEvent::BrowserEvent(BrowserEvent::AlbumSaved(id)) | AppEvent::BrowserEvent(BrowserEvent::AlbumUnsaved(id))
-            if id == &self.id
-        )
+        let route = Route::Album(self.id.clone());
+        event
+            .page_loaded(&route)
+            .is_some_and(|loaded| loaded.contains(PageFields::SAVED))
+            || event.saved(&ItemId::Album(self.id.clone())).is_some()
     }
 }
 
 impl PinnedPageModel for DetailsModel {
-    fn pin_kind(&self) -> settings::PinnedKind {
-        settings::PinnedKind::Album
+    fn pin_kind(&self) -> PinKind {
+        PinKind::Album
     }
 
     fn supports_pin_button(&self) -> bool {
@@ -241,13 +177,7 @@ impl PinnedPageModel for DetailsModel {
 
 impl TrackListModel for DetailsModel {
     fn song_list_model(&self) -> SongListModel {
-        self.app_model
-            .get_state()
-            .browser
-            .details_state(&self.id)
-            .expect("illegal attempt to read details_state")
-            .songs
-            .clone()
+        self.songs.clone()
     }
 
     fn show_song_covers(&self) -> bool {

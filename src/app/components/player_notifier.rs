@@ -1,282 +1,96 @@
-use std::ops::Deref;
-use std::rc::Rc;
-
 use futures::channel::mpsc::UnboundedSender;
-use gio::prelude::*;
-use librespot::core::spotify_id::SpotifyId;
-use librespot::core::SpotifyUri;
+use riff_core::remote::Controller;
 
 use crate::app::components::EventListener;
 use crate::app::state::{
-    Device, LoginAction, LoginEvent, LoginStartedEvent, PlaybackAction, PlaybackEvent,
-    SettingsEvent,
+    Action, DeviceRequest, Event, LoginMethod, PlaybackAction, PlaybackChanged, PlaybackFields,
+    SessionAction, SessionChanged, SessionFields, SessionStatus, Setting, SettingsChanged,
 };
-use crate::app::{AppAction, AppEvent, AppModel, Dispatcher, SongsSource};
-use crate::connect::ConnectCommand;
-use crate::player::Command;
+use crate::app::{AppAction, AppEvent, Dispatcher};
+use riff_playback::player::Command;
 
-use riff_config::settings::SETTINGS;
-
-enum CurrentlyPlaying {
-    WithSource {
-        source: SongsSource,
-        offset: usize,
-        song: String,
-    },
-    Songs {
-        songs: Vec<String>,
-        offset: usize,
-    },
-}
-
-impl CurrentlyPlaying {
-    fn song_id(&self) -> &String {
-        match self {
-            Self::WithSource { song, .. } => song,
-            Self::Songs { songs, offset } => &songs[*offset],
-        }
-    }
-}
+use riff_config::SettingsStore;
 
 pub struct PlayerNotifier {
-    app_model: Rc<AppModel>,
     dispatcher: Dispatcher,
     command_sender: UnboundedSender<Command>,
-    connect_command_sender: UnboundedSender<ConnectCommand>,
-    // Kept alive so its `changed` signals keep firing for live DSP updates.
-    _dsp_settings: gio::Settings,
+    controller: Controller,
+    settings: SettingsStore,
 }
 
 impl PlayerNotifier {
     pub fn new(
-        app_model: Rc<AppModel>,
         dispatcher: Dispatcher,
         command_sender: UnboundedSender<Command>,
-        connect_command_sender: UnboundedSender<ConnectCommand>,
+        controller: Controller,
     ) -> Self {
-        let dsp_settings = Self::watch_dsp_settings(command_sender.clone());
-        Self::watch_skip_explicit_setting(&dsp_settings, &dispatcher);
-        Self::watch_shuffle_separation_setting(&dsp_settings, &dispatcher);
         Self {
-            app_model,
             dispatcher,
             command_sender,
-            connect_command_sender,
-            _dsp_settings: dsp_settings,
+            controller,
+            settings: SettingsStore::new(),
         }
     }
 
-    /// Watch the skip-explicit GSettings key (the preferences toggle) and
-    /// dispatch a PlaybackAction whenever it changes, so the playback state
-    /// stays in sync with the user's local preference.
-    fn watch_skip_explicit_setting(settings: &gio::Settings, dispatcher: &Dispatcher) {
-        let d = dispatcher.clone();
-        settings.connect_changed(Some("skip-explicit"), move |settings, _| {
-            let skip = settings.boolean("skip-explicit");
-            d.dispatch(PlaybackAction::SetSkipExplicit(skip).into());
-        });
-    }
-
-    fn watch_shuffle_separation_setting(settings: &gio::Settings, dispatcher: &Dispatcher) {
-        let d = dispatcher.clone();
-        settings.connect_changed(Some("shuffle-separation"), move |settings, _| {
-            let separation = settings.uint("shuffle-separation");
-            d.dispatch(PlaybackAction::SetShuffleSeparation(separation).into());
-        });
-    }
-
-    /// Watch the equalizer, mono-audio, pan, and pitch GSettings keys and push
-    /// changes to the local player immediately, so adjustments apply live with
-    /// no player reload and no playback interruption.
-    fn watch_dsp_settings(sender: UnboundedSender<Command>) -> gio::Settings {
-        let settings = gio::Settings::new(SETTINGS);
-
-        // Mono audio toggle.
-        let s = sender.clone();
-        settings.connect_changed(Some("mono-audio"), move |settings, _| {
-            let enabled = settings.boolean("mono-audio");
-            let _ = s.unbounded_send(Command::SetMono { enabled });
-        });
-
-        // Stereo pan / balance.
-        let s = sender.clone();
-        settings.connect_changed(Some("pan"), move |settings, _| {
-            let pan = settings.double("pan");
-            let _ = s.unbounded_send(Command::SetPan { pan });
-        });
-
-        // Pitch shift in cents.
-        let s = sender.clone();
-        settings.connect_changed(Some("pitch-cents"), move |settings, _| {
-            let cents = settings.double("pitch-cents");
-            let _ = s.unbounded_send(Command::SetPitch { cents });
-        });
-
-        // 10-band EQ: any band change sends the full band array.
-        for band_key in &[
-            "eq-band-0",
-            "eq-band-1",
-            "eq-band-2",
-            "eq-band-3",
-            "eq-band-4",
-            "eq-band-5",
-            "eq-band-6",
-            "eq-band-7",
-            "eq-band-8",
-            "eq-band-9",
-        ] {
-            let s = sender.clone();
-            settings.connect_changed(Some(band_key), move |settings, _| {
-                let bands = [
-                    settings.double("eq-band-0"),
-                    settings.double("eq-band-1"),
-                    settings.double("eq-band-2"),
-                    settings.double("eq-band-3"),
-                    settings.double("eq-band-4"),
-                    settings.double("eq-band-5"),
-                    settings.double("eq-band-6"),
-                    settings.double("eq-band-7"),
-                    settings.double("eq-band-8"),
-                    settings.double("eq-band-9"),
-                ];
-                let _ = s.unbounded_send(Command::SetEqualizer { bands });
-            });
+    fn apply_settings(&self, changed: &SettingsChanged) {
+        let settings = &self.settings;
+        if changed.contains(Setting::SkipExplicit) {
+            let skip = settings.bool(Setting::SkipExplicit);
+            self.dispatcher
+                .dispatch(PlaybackAction::SetSkipExplicit(skip).into());
         }
-
-        settings
+        let effects = vec![
+            changed
+                .contains(Setting::MonoAudio)
+                .then(|| Command::SetMono {
+                    enabled: settings.bool(Setting::MonoAudio),
+                }),
+            changed.contains(Setting::Pan).then(|| Command::SetPan {
+                pan: settings.double(Setting::Pan),
+            }),
+            changed
+                .contains(Setting::PitchCents)
+                .then(|| Command::SetPitch {
+                    cents: settings.double(Setting::PitchCents),
+                }),
+            changed
+                .contains_any(&Setting::EQ_BANDS)
+                .then(|| Command::SetEqualizer {
+                    bands: Setting::EQ_BANDS.map(|band| settings.double(band)),
+                }),
+        ];
+        for command in effects.into_iter().flatten() {
+            let _ = self.command_sender.unbounded_send(command);
+        }
     }
 
-    fn is_playing(&self) -> bool {
-        self.app_model.get_state().playback.is_playing()
-    }
-
-    fn currently_playing(&self) -> Option<CurrentlyPlaying> {
-        let state = self.app_model.get_state();
-        let song = state.playback.current_song_id()?;
-        let source = state.playback.current_source().cloned();
-        let context_offset = state.playback.current_context_index();
-        let result = match (source, context_offset) {
-            (Some(source), Some(offset)) if source.has_spotify_uri() => {
-                CurrentlyPlaying::WithSource {
-                    source,
-                    offset,
-                    song,
-                }
-            }
-            _ => CurrentlyPlaying::Songs {
-                songs: state.playback.upcoming_ids(),
-                offset: 0,
-            },
-        };
-        Some(result)
-    }
-
-    fn device(&self) -> impl Deref<Target = Device> + '_ {
-        self.app_model.map_state(|s| s.playback.current_device())
-    }
-
-    fn notify_login(&self, event: &LoginEvent) {
-        info!("notify_login: {:?}", event);
-        let command = match event {
-            LoginEvent::LoginStarted(LoginStartedEvent::Restore) => Some(Command::Restore),
-            LoginEvent::LoginStarted(LoginStartedEvent::InitLogin) => Some(Command::InitLogin),
-            LoginEvent::LogoutCompleted => Some(Command::Logout),
+    fn notify_login(&self, event: &SessionChanged) {
+        if !event.changed.contains(SessionFields::STATUS) {
+            return;
+        }
+        info!("notify_login: {:?}", event.status);
+        let command = match event.status {
+            SessionStatus::LoggingIn(LoginMethod::Saved) => Some(Command::Restore),
+            SessionStatus::LoggingIn(LoginMethod::Browser) => Some(Command::InitLogin),
+            SessionStatus::LoggedOut => Some(Command::Logout),
             _ => None,
         };
-
         if let Some(command) = command {
             self.send_command_to_local_player(command);
         }
-    }
-
-    fn notify_connect_player(&self, event: &PlaybackEvent) {
-        let event = event.clone();
-        let currently_playing = self.currently_playing();
-        let command = match event {
-            PlaybackEvent::TrackChanged(_) | PlaybackEvent::SourceChanged => {
-                match currently_playing {
-                    Some(CurrentlyPlaying::WithSource {
-                        source,
-                        offset,
-                        song,
-                    }) => Some(ConnectCommand::PlayerLoadInContext {
-                        source,
-                        offset,
-                        song,
-                    }),
-                    Some(CurrentlyPlaying::Songs { songs, offset }) => {
-                        Some(ConnectCommand::PlayerLoad { songs, offset })
-                    }
-                    None => None,
-                }
-            }
-            PlaybackEvent::TrackSeeked(position) => {
-                Some(ConnectCommand::PlayerSeek(position as usize))
-            }
-            PlaybackEvent::PlaybackPaused => Some(ConnectCommand::PlayerPause),
-            PlaybackEvent::PlaybackResumed => Some(ConnectCommand::PlayerResume),
-            PlaybackEvent::VolumeSet(volume) => Some(ConnectCommand::PlayerSetVolume(
-                (volume * 100f64).trunc() as u8,
-            )),
-            PlaybackEvent::RepeatModeChanged(mode) => Some(ConnectCommand::PlayerRepeat(mode)),
-            PlaybackEvent::ShuffleChanged(shuffled) => {
-                Some(ConnectCommand::PlayerShuffle(shuffled))
-            }
-            _ => None,
-        };
-
-        if let Some(command) = command {
-            self.send_command_to_connect_player(command);
+        if event.status == SessionStatus::LoggedIn {
+            self.controller.reconnect();
         }
     }
 
-    fn notify_local_player(&self, event: &PlaybackEvent) {
-        let command = match event {
-            PlaybackEvent::PlaybackPaused => Some(Command::PlayerPause),
-            PlaybackEvent::PlaybackResumed => Some(Command::PlayerResume),
-            PlaybackEvent::PlaybackStopped => Some(Command::PlayerStop),
-            PlaybackEvent::VolumeSet(volume) => Some(Command::PlayerSetVolume(*volume)),
-            PlaybackEvent::SkipExplicitChanged(skip) => {
-                // Sync GSettings with the internal state so the UI toggle
-                // reflects changes forced by the account's explicit filter.
-                // GSettings deduplicates writes of the same value, so this
-                // won't cause an infinite loop with the watcher.
-                self._dsp_settings.set_boolean("skip-explicit", *skip).ok();
-                None
-            }
-            PlaybackEvent::TrackChanged(id) => {
-                info!("track changed: {}", id);
-                SpotifyId::from_base62(id)
-                    .ok()
-                    .map(|track| Command::PlayerLoad {
-                        track: SpotifyUri::Track { id: track },
-                        resume: true,
-                    })
-            }
-            PlaybackEvent::SourceChanged => {
-                let resume = self.is_playing();
-                self.currently_playing()
-                    .and_then(|c| SpotifyId::from_base62(c.song_id()).ok())
-                    .map(|track| Command::PlayerLoad {
-                        track: SpotifyUri::Track { id: track },
-                        resume,
-                    })
-            }
-            PlaybackEvent::TrackSeeked(position) => Some(Command::PlayerSeek(*position)),
-            PlaybackEvent::Preload(id) => SpotifyId::from_base62(id)
-                .ok()
-                .map(|track| SpotifyUri::Track { id: track })
-                .map(Command::PlayerPreload),
-            _ => None,
-        };
-
-        if let Some(command) = command {
-            self.send_command_to_local_player(command);
+    fn sync_skip_explicit(&self, event: &PlaybackChanged) {
+        if !event.changed.contains(PlaybackFields::SKIP_EXPLICIT) {
+            return;
         }
-    }
-
-    fn send_command_to_connect_player(&self, command: ConnectCommand) {
-        self.connect_command_sender.unbounded_send(command).unwrap();
+        let skip = event.state.skip_explicit;
+        self.settings.set_bool(Setting::SkipExplicit, skip).ok();
+        self.controller.set_skip_explicit(skip);
+        self.send_command_to_local_player(Command::SetSkipExplicit(skip));
     }
 
     fn send_command_to_local_player(&self, command: Command) {
@@ -284,38 +98,33 @@ impl PlayerNotifier {
         self.command_sender
             .unbounded_send(command)
             .unwrap_or_else(|_| {
-                dispatcher.dispatch(AppAction::LoginAction(LoginAction::SetLoginFailure));
+                dispatcher.dispatch(AppAction::Core(Action::Session(SessionAction::LoginFailed)));
             });
-    }
-
-    fn switch_device(&mut self, device: &Device) {
-        match device {
-            Device::Connect(device) => {
-                self.send_command_to_local_player(Command::PlayerStop);
-                self.send_command_to_connect_player(ConnectCommand::SetDevice(device.id.clone()));
-                self.notify_connect_player(&PlaybackEvent::SourceChanged);
-            }
-            Device::Local => {
-                self.send_command_to_connect_player(ConnectCommand::PlayerStop);
-                self.notify_local_player(&PlaybackEvent::SourceChanged);
-            }
-        }
     }
 }
 
 impl EventListener for PlayerNotifier {
     fn on_event(&mut self, event: &AppEvent) {
-        let device = self.device().clone();
-        match (device, event) {
-            (_, AppEvent::LoginEvent(event)) => self.notify_login(event),
-            (_, AppEvent::PlaybackEvent(PlaybackEvent::SwitchedDevice(d))) => self.switch_device(d),
-            (Device::Local, AppEvent::PlaybackEvent(event)) => self.notify_local_player(event),
-            (Device::Local, AppEvent::SettingsEvent(SettingsEvent::PlayerSettingsChanged)) => {
-                self.send_command_to_local_player(Command::ReloadSettings)
+        let AppEvent::Core(event) = event else {
+            return;
+        };
+        match event {
+            Event::Session(event) => self.notify_login(event),
+            Event::DeviceRequest(DeviceRequest::Control(intent)) => {
+                self.controller.send(intent.clone())
             }
-            (Device::Connect(_), AppEvent::PlaybackEvent(event)) => {
-                self.notify_connect_player(event)
+            Event::DeviceRequest(DeviceRequest::ThisDevice(id)) => {
+                self.controller.set_this_device_id(id.clone())
             }
+            Event::DeviceRequest(DeviceRequest::PlayerReport(report)) => {
+                self.controller.report(report.clone())
+            }
+            Event::Playback(event) => self.sync_skip_explicit(event),
+            Event::Settings(changed) => self.apply_settings(changed),
+            Event::TokenRejected => self.send_command_to_local_player(Command::RefreshToken),
+            Event::PlayerSettingsChanged => self.send_command_to_local_player(
+                Command::ReloadSettings(crate::settings::player_settings().unwrap_or_default()),
+            ),
             _ => {}
         }
     }

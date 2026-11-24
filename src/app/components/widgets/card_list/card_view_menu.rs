@@ -7,7 +7,7 @@ use std::rc::Rc;
 use super::widget::CardList;
 use crate::app::components::{CardLayout, CardSize, SortOrder};
 use crate::app::models::FilterOption;
-use crate::app::{BrowserAction, Dispatcher};
+use crate::app::{AppAction, Dispatcher};
 
 mod imp {
     use super::*;
@@ -61,8 +61,6 @@ impl CardViewMenuPopoverWidget {
     }
 }
 
-// Public API
-
 /// Returns the sort to actually apply: the user's preferred sort if it's
 /// available for this page, otherwise the first available sort.
 pub(super) fn effective_sort(preferred: SortOrder, available: &[SortOrder]) -> SortOrder {
@@ -84,9 +82,6 @@ fn icon_for_layout(layout: CardLayout) -> &'static str {
     }
 }
 
-/// A Nautilus-style split button: clicking cycles the card layout,
-/// the dropdown arrow opens a popover with icon size controls, sort options
-/// and (optionally) filter options.
 pub struct CardViewMenu {
     pub split_button: libadwaita::SplitButton,
 }
@@ -106,7 +101,6 @@ impl CardViewMenu {
         let popover = CardViewMenuPopoverWidget::new();
         let imp = popover.imp();
 
-        // Wire size buttons
         Self::connect_size_buttons(
             &imp.decrease_btn,
             &imp.increase_btn,
@@ -116,7 +110,6 @@ impl CardViewMenu {
             dispatcher.clone(),
         );
 
-        // Wire sort radio buttons into sort_box
         Self::populate_sort_section(
             &imp.sort_box,
             &page_id,
@@ -127,7 +120,6 @@ impl CardViewMenu {
             dispatcher.clone(),
         );
 
-        // Hide the entire sort section if no sort options are available.
         imp.sort_section.set_visible(!available_sorts.is_empty());
 
         Self::populate_filter_section(
@@ -138,7 +130,6 @@ impl CardViewMenu {
         );
         imp.filter_section.set_visible(!filters.is_empty());
 
-        // Sync button sensitivity when popover opens
         let size_ref = Rc::clone(&size);
         let dec = imp.decrease_btn.clone();
         let inc = imp.increase_btn.clone();
@@ -160,7 +151,7 @@ impl CardViewMenu {
             layout_ref.set(next);
             btn.set_icon_name(icon_for_layout(next));
             card_list_ref.update_layout(next);
-            dispatch.dispatch(BrowserAction::ChangeCardLayout(next).into());
+            dispatch.dispatch(AppAction::ChangeCardLayout(next));
         });
 
         Self { split_button }
@@ -198,7 +189,7 @@ impl CardViewMenu {
             if let Some(inc_btn) = inc_btn.upgrade() {
                 inc_btn.set_sensitive(true);
             }
-            dispatch.dispatch(BrowserAction::ChangeCardSize(new_size).into());
+            dispatch.dispatch(AppAction::ChangeCardSize(new_size));
         });
 
         let size_ref = size;
@@ -212,7 +203,7 @@ impl CardViewMenu {
             if let Some(dec_btn) = dec_btn.upgrade() {
                 dec_btn.set_sensitive(true);
             }
-            dispatcher.dispatch(BrowserAction::ChangeCardSize(new_size).into());
+            dispatcher.dispatch(AppAction::ChangeCardSize(new_size));
         });
     }
 
@@ -249,7 +240,7 @@ impl CardViewMenu {
                 let order = orders[i];
                 sort.set(order);
                 card_list.set_sort(order);
-                dispatcher.dispatch(BrowserAction::ChangeSortOrder(page.clone(), order).into());
+                dispatcher.dispatch(AppAction::ChangeSortOrder(page.clone(), order));
             },
         );
     }

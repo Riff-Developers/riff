@@ -5,9 +5,10 @@ use std::rc::Rc;
 use crate::app::components::{
     AppHeaderBar, BottomSheet, Component, EventListener, QueuePage, QueuePageWidget, UtilityPanel,
 };
-use crate::app::state::PlaybackEvent;
+use crate::app::state::Action;
+use crate::app::state::PlaybackFields;
 use crate::app::{AppAction, AppEvent, AppModel, Dispatcher};
-use crate::settings::{QUEUE_SIDE_PANEL, SETTINGS};
+use riff_config::{Setting, SettingsStore};
 
 const TOGGLE_ACTION: &str = "utility-panel";
 
@@ -18,8 +19,8 @@ enum Placement {
 }
 
 impl Placement {
-    fn from_settings(settings: &gio::Settings) -> Self {
-        if settings.boolean(QUEUE_SIDE_PANEL) {
+    fn from_settings(settings: &SettingsStore) -> Self {
+        if settings.bool(Setting::QueueSidePanel) {
             Self::Side
         } else {
             Self::Sheet
@@ -93,7 +94,7 @@ pub struct PanelManager {
     queue: QueuePage,
     panels: Rc<Panels>,
     app_model: Rc<AppModel>,
-    _settings: gio::Settings,
+    settings: SettingsStore,
 }
 
 impl PanelManager {
@@ -124,22 +125,14 @@ impl PanelManager {
             action: gio::SimpleAction::new_stateful(TOGGLE_ACTION, None, &false.to_variant()),
             placement: Cell::new(None),
         });
-        let settings = gio::Settings::new(SETTINGS);
+        let settings = SettingsStore::new();
         panels.place(Placement::from_settings(&settings));
-        settings.connect_changed(
-            Some(QUEUE_SIDE_PANEL),
-            clone!(
-                #[weak]
-                panels,
-                move |settings, _| panels.place(Placement::from_settings(settings))
-            ),
-        );
 
         let manager = Self {
             queue,
             panels,
             app_model,
-            _settings: settings,
+            settings,
         };
         manager.wire_toggle(window, dispatcher);
         manager
@@ -164,7 +157,7 @@ impl PanelManager {
             action.set_state(&panels.is_open().to_variant());
             panels.sync_header();
             if !panels.is_open() && app_model.get_state().selection.is_selecting_in(true) {
-                dispatcher.dispatch(AppAction::CancelSelection);
+                dispatcher.dispatch(AppAction::Core(Action::CancelSelection));
             }
         });
         self.panels.panel.connect_open_notify(clone!(
@@ -198,17 +191,17 @@ impl Component for PanelManager {
 impl EventListener for PanelManager {
     fn on_event(&mut self, event: &AppEvent) {
         self.queue.on_event(event);
-        if let AppEvent::SelectionEvent(_)
-        | AppEvent::PlaybackEvent(PlaybackEvent::PlaylistChanged) = event
+        if event
+            .settings()
+            .is_some_and(|changed| changed.contains(Setting::QueueSidePanel))
         {
+            self.panels.place(Placement::from_settings(&self.settings));
+        }
+        if event.selection().is_some() || event.queue_changed() {
             self.sync_selection();
         }
-        if let AppEvent::PlaybackEvent(
-            PlaybackEvent::TrackChanged(_)
-            | PlaybackEvent::PlaybackStopped
-            | PlaybackEvent::PlaylistChanged
-            | PlaybackEvent::SourceChanged,
-        ) = event
+        if event.queue_changed()
+            || event.playback_changed(PlaybackFields::TRACK | PlaybackFields::CONTEXT)
         {
             self.panels
                 .sheet

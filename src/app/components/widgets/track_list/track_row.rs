@@ -17,39 +17,23 @@ use crate::app::components::utils::{add_hover_class, decode_px, set_css_class, s
 use crate::app::components::{
     display_add_css_provider, labels, SubtitleLinksBox, PLAYLIST_PICKER_MENU_ID,
 };
-use crate::app::load;
 use crate::app::models::{SongModel, Track};
+use riff_core::load;
 
-/// Height of every track list row, tracks and disc headers alike.
 pub const ROW_HEIGHT_PX: i32 = 56;
 
 pub const COVER_SIZE: i32 = 40;
 
-// Responsive breakpoints: the row pixel width at or below which a column
-// hides. When the width decreases album hides first, then the track time:
-//
-//   width > 600          cover  title/artist | album   (like)  time  menu
-//   400 < width <= 600   cover  title/artist           (like)  time  menu
-//   width <= 400         cover  title/artist           (like)        menu
-//
-// To add a breakpoint: add a const here, a RowWidth variant, register it in
-// TrackRow::setup (widest first), map it in the current-breakpoint handler,
-// and act on it in TrackRow::update_layout.
 const HIDE_ALBUM_AT_PX: f64 = 600.0;
 const HIDE_TIME_AT_PX: f64 = 400.0;
 
-/// Room for like_btn (34px `button.circular` plus a gap) at the end of the
-/// rightmost text column while it shows.
 const LIKE_RESERVE_PX: i32 = 34 + 6;
 
-/// Classes shared by the artist and album labels (song_album sets them in
-/// the .blp).
 const SECONDARY_TEXT_CLASSES: &[&str] = &["subtitle", "dimmed"];
 
 const LINK_CLASS: &str = "song__link";
 const LINK_HOVER_CLASS: &str = "song__link--hover";
 
-/// Which breakpoint the row is in (see HIDE_ALBUM_AT_PX).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum RowWidth {
     #[default]
@@ -80,7 +64,6 @@ fn in_selection_mode(widget: &gtk::Widget) -> bool {
 
 fn wire_link_label(label: &gtk::Label, action_name: String) {
     let click = gtk::GestureClick::new();
-    // Claim the click so the row doesn't also play the track.
     click.set_propagation_phase(gtk::PropagationPhase::Capture);
     click.connect_released(move |gesture, _, _, _| {
         let Some(label) = gesture.widget() else {
@@ -130,12 +113,10 @@ mod imp {
         pub menu_btn: TemplateChild<gtk::MenuButton>,
         pub menu: RefCell<Option<RowMenu>>,
 
-        // Inputs to update_layout.
         pub(super) width: Cell<RowWidth>,
         pub(super) hovered: Cell<bool>,
         pub(super) show_album: Cell<bool>,
 
-        // Inputs to update_unplayable.
         pub(super) playable: Cell<bool>,
         pub(super) explicit_filtered: Cell<bool>,
 
@@ -498,7 +479,6 @@ impl TrackRow {
         imp.song_checkbox.set_active(false);
         imp.song_cover.set_paintable(None::<&gdk::Paintable>);
         set_missing_art(&*imp.song_cover, false);
-        // Placeholder text sizes the blocks; it's never visible.
         imp.song_title.set_label("Loading track title");
         imp.song_artist.clear_links();
         let artist = gtk::Label::new(Some("Artist name"));
@@ -507,8 +487,6 @@ impl TrackRow {
         imp.song_length.set_label("0∶00");
         imp.show_album.set(false);
         self.set_actions(None);
-        // No menu, but the button keeps its space (hidden by the CSS), so
-        // the time block sits where a real row's time does.
         self.set_menu(None, None);
         imp.menu_btn.set_visible(true);
         self.update_layout();
@@ -518,7 +496,6 @@ impl TrackRow {
         let imp = self.imp();
         imp.skeleton.set(skeleton);
         set_css_class(self, "song--skeleton", skeleton);
-        // A block the size of the text, not of the whole column.
         imp.song_title.set_halign(if skeleton {
             gtk::Align::Start
         } else {

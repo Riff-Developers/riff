@@ -1,5 +1,5 @@
 use crate::app::components::EventListener;
-use crate::app::state::PlaybackEvent;
+use crate::app::state::{Event, SessionFields};
 use crate::app::AppEvent;
 use gettextrs::*;
 use gtk::prelude::*;
@@ -83,7 +83,6 @@ impl Notification {
             .title(content)
             .timeout(4)
             .build();
-        // Dedup identical messages by their text.
         self.add(content.to_string(), toast);
     }
 
@@ -131,10 +130,10 @@ impl EventListener for Notification {
         match event {
             AppEvent::NotificationShown(content) => self.show(content),
             AppEvent::RestartRequiredShown => self.show_restart_required(),
-            AppEvent::ConnectionLostChanged(lost) => self.set_connection_lost(*lost),
-            AppEvent::PlaybackEvent(PlaybackEvent::NoPreviousTrack) => {
-                // translators: Shown in a toast when the user presses Previous but there is no earlier track to play.
-                self.show(&gettext("No previous track"))
+            AppEvent::Core(Event::Session(session))
+                if session.changed.contains(SessionFields::CONNECTION) =>
+            {
+                self.set_connection_lost(session.connection_lost)
             }
             _ => {}
         }

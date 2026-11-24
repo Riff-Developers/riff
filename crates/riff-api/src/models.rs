@@ -1,8 +1,3 @@
-//! Provider-neutral music API models.
-//!
-//! Common-denominator types shared across Spotify, Apple Music, TIDAL, etc.
-//! Intentionally decoupled from any single provider's schema.
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,7 +269,7 @@ pub struct SavedItem<T> {
     pub added_at: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SearchType {
     Track,
     Album,
@@ -290,22 +285,23 @@ pub struct SearchResults {
     pub playlists: Page<Playlist>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceKind {
     Phone,
     Computer,
     Speaker,
     Tv,
+    #[default]
     Other,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Device {
     pub id: String,
     pub label: String,
     pub kind: DeviceKind,
-    pub is_active: bool,
     pub volume_percent: Option<u8>,
+    pub supports_volume: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,22 +310,6 @@ pub enum RepeatMode {
     Off,
     Track,
     Context,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlayerState {
-    pub is_playing: bool,
-    pub current_track_id: Option<ResourceId>,
-    pub progress_ms: u32,
-    pub repeat: RepeatMode,
-    pub shuffle: bool,
-    pub device: Option<Device>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Queue {
-    pub currently_playing: Option<Track>,
-    pub items: Vec<Track>,
 }
 
 #[cfg(test)]
@@ -352,7 +332,6 @@ mod tests {
         };
         assert_eq!(set.best_for_width(100), Some("img300"));
         assert_eq!(set.best_for_width(64), Some("img64"));
-        // Nothing large enough falls back to the largest.
         assert_eq!(set.best_for_width(5000), Some("img640"));
         assert_eq!(set.largest(), Some("img640"));
     }
@@ -383,8 +362,6 @@ mod tests {
         let set =
             ImageSet::from_resource("resource:///dev/diegovsky/Riff/defaults/album-default.svg");
         assert!(set.is_resource());
-        // A resource set has a single, width-less image, so the size helpers
-        // still return its URL.
         assert_eq!(
             set.largest(),
             Some("resource:///dev/diegovsky/Riff/defaults/album-default.svg")
@@ -409,7 +386,15 @@ mod tests {
     fn unknown_artist_ref_has_empty_id_and_fallback_name() {
         let a = ArtistRef::unknown();
         assert!(a.rri.id.is_empty());
-        // gettext with no bound catalog returns the source string.
         assert_eq!(a.name, "Unknown Artist");
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Link {
+    Album(String),
+    Artist(String),
+    Playlist(String),
+    User(String),
+    Track(String),
 }

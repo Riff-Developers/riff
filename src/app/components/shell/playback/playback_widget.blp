@@ -63,20 +63,13 @@ template $PlaybackWidget : Box {
         volume_box.visible: false;
         volume_button.visible: true;
         queue_button.visible: false;
+        device_selector.visible: false;
         playback_center.margin-start: 16;
         playback_center.margin-end: 16;
-        // Narrow: drop equal thirds. The transport controls need more than a
-        // third on a phone-width window, so let each slot take its natural
-        // size; the expanding side slots keep the controls centred.
         playback_center.homogeneous: false;
       }
     }
 
-    // Desktop: three equal-width columns (now playing, controls, volume). The
-    // homogeneous split means the now-playing card is bounded by its own column
-    // and can never grow into the controls' column, so the centred controls
-    // stay put no matter how long the title or artist is. The narrow breakpoint
-    // turns homogeneity off (see above).
     child: Box playback_center {
       orientation: horizontal;
       homogeneous: true;
@@ -88,17 +81,11 @@ template $PlaybackWidget : Box {
       margin-start: 8;
       margin-end: 8;
 
-      // The side slots expand so that, when homogeneity is off in narrow mode,
-      // they absorb the leftover width equally and keep the controls centred.
-      // Under homogeneity (desktop) the expand is a no-op; every column is equal.
       Box now_playing_start {
         hexpand: true;
         halign: start;
         valign: center;
 
-        // Narrow mode replaces the track info with a compact button. The
-        // breakpoint toggles this box; the button inside is shown in code only
-        // when a track is playing.
         Box now_playing_button_box {
           visible: false;
           width-request: 40;
@@ -124,8 +111,6 @@ template $PlaybackWidget : Box {
           overflow: hidden;
           halign: start;
 
-          // The card is bounded by its equal-width column, so a long title or
-          // artist ellipsizes within the column instead of widening it.
           $PlaybackInfoWidget now_playing {
             receives-default: "1";
             halign: "start";
@@ -137,14 +122,11 @@ template $PlaybackWidget : Box {
       }
 
       $PlaybackControlsWidget controls {
-        // Keep the control cluster at its natural width, centred in its column.
         hexpand: false;
         halign: center;
         valign: center;
       }
 
-      // Right column. Expands only to help centre the controls when homogeneity
-      // is off (narrow mode); its content is aligned to the right edge.
       Box {
         hexpand: true;
         halign: end;
@@ -167,7 +149,19 @@ template $PlaybackWidget : Box {
           ]
         }
 
-        // With the queue button, 250 wide
+        $DeviceSelectorWidget device_selector {
+          width-request: 40;
+          margin-end: 6;
+          halign: end;
+          valign: center;
+          focus-on-click: false;
+          can-focus: false;
+
+          styles [
+            "flat"
+          ]
+        }
+
         Box volume_box {
           width-request: 204;
 

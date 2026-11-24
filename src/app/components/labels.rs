@@ -31,6 +31,9 @@ lazy_static! {
     // translators: Header of the current track, on the queue page (when shown in the list).
     pub static ref QUEUE_NOW_PLAYING: String = gettext("Now Playing");
 
+    // translators: Header above the rest of what plays, on the queue page, when where it comes from has no name.
+    pub static ref QUEUE_NEXT_UP: String = gettext("Next Up");
+
     // translators: Tooltip of the button in the header of the queued tracks, on the queue page. It removes all queued tracks.
     pub static ref CLEAR_QUEUE: String = gettext("Clear Queue");
 
@@ -133,8 +136,6 @@ pub fn n_tracks_selected_label(n: usize) -> String {
     fill(text, &[&n.to_string()])
 }
 
-// Fills the `{}` of a translated text in order. xgettext only finds the
-// literal passed straight to `gettext`, so format with this instead of a macro.
 pub fn fill(text: String, args: &[&str]) -> String {
     let mut parts = text.split("{}");
     let mut filled = parts.next().unwrap_or_default().to_string();
@@ -174,16 +175,6 @@ pub fn queue_context_label(name: &str) -> String {
     fill(gettext("Next from: {}"), &[name])
 }
 
-pub fn shuffle_separation_label(n: u32) -> String {
-    let text = ngettext(
-        // translators: Description of the shuffle separation preference. {} is the number of other songs, chosen by the user. "When possible" because an album or playlist can have too few songs.
-        "When possible, shuffle and repeat mode will play at least {} other song before repeating a song",
-        "When possible, shuffle and repeat mode will play at least {} other songs before repeating a song",
-        n,
-    );
-    fill(text, &[&n.to_string()])
-}
-
 pub fn more_from_label(artist: &str) -> String {
     // translators: This is part of a contextual menu attached to a single track; the full text is "More from <artist>".
     fill(gettext("More from {}"), &[artist])
@@ -216,8 +207,6 @@ mod tests {
 
     #[test]
     fn test_formatted_labels() {
-        assert!(shuffle_separation_label(1).contains("at least 1 other song before"));
-        assert!(shuffle_separation_label(3).contains("at least 3 other songs before"));
         for markup in [
             now_playing_markup("Rock & Roll", "<Band>"),
             current_track_markup("Rock & Roll", "<Band>"),

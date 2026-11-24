@@ -5,6 +5,30 @@ edition = "2021"
 license = "MIT"
 description = "Riff's app logic between the UI and the API layer, free of UI dependencies."
 
+[features]
+test-support = []
+
 [dependencies]
 riff-api = { path = "../riff-api" }
+riff-config = { path = "../riff-config", default-features = false }
+bitflags = "2"
+futures = "0.3.18"
+log = "0.4.17"
 rand = "0.10.3"
+url = "2"
+uuid = { version = "1.18", features = ["v4"] }
+
+[dependencies.tokio]
+version = "1"
+features = ["rt", "macros", "sync", "time"]
+
+[dependencies.tokio-tungstenite]
+version = "0.28"
+features = ["native-tls"]
+
+[dev-dependencies.tokio]
+version = "1"
+features = ["rt", "macros", "sync", "time", "test-util"]
+
+[lints]
+workspace = true

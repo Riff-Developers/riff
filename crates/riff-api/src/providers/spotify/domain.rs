@@ -1,7 +1,3 @@
-//! Domain layer: auth-injecting Spotify API client.
-//!
-//! Caching is handled one layer up in `service.rs`.
-
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -12,20 +8,21 @@ use async_trait::async_trait;
 use futures::future::try_join_all;
 
 use super::converter::*;
-use super::internal_api::SpotifyInternalApi;
+use super::internal_api::{connect_state, SpotifyInternalApi};
 use crate::defaults::{self, EntityKind};
 use crate::error::DomainError;
 use crate::models::*;
 use crate::providers::{content_rating_from_explicit, MusicProvider};
+use crate::remote::{
+    ProviderCapabilities, RemoteCluster, RemoteCommand, RemoteEndpoint, RemotePush,
+    TransferPlayback,
+};
 use crate::token::TokenProvider;
 
-/// Most URIs `GET /me/library/contains` accepts per request.
 const MAX_LIBRARY_CHECK_ITEMS: usize = 40;
 
-/// Most ids `PUT` and `DELETE /me/tracks` accept per request.
 const MAX_SAVED_TRACKS_ITEMS: usize = 50;
 
-/// Most items a request adding to or removing from a playlist accepts.
 const MAX_PLAYLIST_WRITE_ITEMS: usize = 100;
 
 const USER_MARKET: &str = "from_token";
@@ -99,6 +96,41 @@ impl<T: std::fmt::Debug> From<apis::Error<T>> for DomainError {
     }
 }
 
+async fn get_tracks_nullable(
+    config: &Configuration,
+    ids: &[String],
+) -> Result<Vec<Option<sp::TrackObject>>, apis::Error<()>> {
+    let mut request = config
+        .client
+        .get(format!("{}/tracks", config.base_path))
+        .query(&[("ids", ids.join(",").as_str()), ("market", USER_MARKET)]);
+    if let Some(user_agent) = &config.user_agent {
+        request = request.header(reqwest::header::USER_AGENT, user_agent);
+    }
+    if let Some(token) = &config.oauth_access_token {
+        request = request.bearer_auth(token);
+    }
+    let response = config.client.execute(request.build()?).await?;
+    let status = response.status();
+    let content = response.text().await?;
+    if status.is_client_error() || status.is_server_error() {
+        return Err(apis::Error::ResponseError(apis::ResponseContent {
+            status,
+            content,
+            entity: None,
+        }));
+    }
+    Ok(parse_tracks_nullable(&content)?)
+}
+
+fn parse_tracks_nullable(content: &str) -> serde_json::Result<Vec<Option<sp::TrackObject>>> {
+    #[derive(serde::Deserialize)]
+    struct SeveralTracks {
+        tracks: Vec<Option<sp::TrackObject>>,
+    }
+    Ok(serde_json::from_str::<SeveralTracks>(content)?.tracks)
+}
+
 struct CachedConfig {
     config: Configuration,
     created_at: Instant,
@@ -162,6 +194,19 @@ impl SpotifyDomain {
 
 #[async_trait]
 impl MusicProvider for SpotifyDomain {
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            remote_devices: true,
+        }
+    }
+
+    fn uris(&self) -> crate::remote::ContentUris {
+        crate::remote::ContentUris::new(
+            |context| Some(super::context_uri(context)),
+            |track_id| Some(format!("spotify:track:{track_id}")),
+        )
+    }
+
     fn invalidate_config(&self) {
         debug!("spotify: dropping the cached API config after an auth failure");
         let mut guard = self.cached_config.write().unwrap();
@@ -272,6 +317,21 @@ impl MusicProvider for SpotifyDomain {
         track_from_object(&raw).ok_or_else(|| DomainError::Parse("track missing id".into()))
     }
 
+    async fn get_tracks(&self, ids: &[String]) -> Result<Vec<(String, Track)>, DomainError> {
+        let config = self.config_or_err()?;
+        let tracks = get_tracks_nullable(&config, ids).await?;
+        Ok(ids
+            .iter()
+            .cloned()
+            .zip(
+                tracks
+                    .iter()
+                    .map(|track| track.as_ref().and_then(track_from_object)),
+            )
+            .filter_map(|(id, track)| Some((id, track?)))
+            .collect())
+    }
+
     async fn get_saved_tracks(
         &self,
         offset: usize,
@@ -322,10 +382,6 @@ impl MusicProvider for SpotifyDomain {
 
     async fn save_tracks(&self, ids: Vec<String>) -> Result<(), DomainError> {
         let config = self.config_or_err()?;
-        // Save via PUT /me/tracks with the IDs in the request body. This mirrors
-        // remove_tracks (DELETE /me/tracks) and takes bare Spotify track IDs.
-        // The generic save_library_items endpoint expects full Spotify URIs, not
-        // the bare IDs the app passes, so it silently rejects likes.
         for ids in ids.chunks(MAX_SAVED_TRACKS_ITEMS) {
             let body = sp::SaveTracksUserRequest {
                 ids: Some(ids.to_vec()),
@@ -703,110 +759,63 @@ impl MusicProvider for SpotifyDomain {
         Ok(search_results_from_response(&resp))
     }
 
-    async fn get_devices(&self) -> Result<Vec<Device>, DomainError> {
-        let config = self.config_or_err()?;
-        let resp = apis::player_api::get_a_users_available_devices(&config).await?;
-        Ok(resp.devices.iter().filter_map(device_from_object).collect())
+    async fn remote_endpoint(&self) -> Result<RemoteEndpoint, DomainError> {
+        connect_state::endpoint(&self.internal_api).await
     }
 
-    async fn get_player_queue(&self) -> Result<Queue, DomainError> {
-        let config = self.config_or_err()?;
-        Ok(queue_from_object(
-            &apis::player_api::get_queue(&config).await?,
-        ))
+    fn parse_remote_push(&self, text: &str) -> RemotePush {
+        connect_state::parse_push(text)
     }
 
-    async fn get_player_state(&self) -> Result<PlayerState, DomainError> {
-        let config = self.config_or_err()?;
-        let raw =
-            apis::player_api::get_information_about_the_users_current_playback(&config, None, None)
-                .await?;
-        Ok(player_state_from_object(&raw))
+    fn remote_keepalive(&self) -> &'static str {
+        connect_state::PING
     }
 
-    async fn player_resume(&self, device_id: &str) -> Result<(), DomainError> {
-        let config = self.config_or_err()?;
-        Ok(apis::player_api::start_a_users_playback(&config, Some(device_id), None).await?)
-    }
-
-    async fn player_play_in_context(
+    async fn remote_register(
         &self,
-        device_id: &str,
-        context_uri: &str,
-        offset: usize,
-    ) -> Result<(), DomainError> {
-        let config = self.config_or_err()?;
-        let mut offset_map = std::collections::HashMap::new();
-        offset_map.insert("position".to_string(), serde_json::json!(offset));
-        let body = sp::StartAUsersPlaybackRequest {
-            context_uri: Some(context_uri.to_string()),
-            uris: None,
-            offset: Some(offset_map),
-            position_ms: None,
-        };
-        Ok(apis::player_api::start_a_users_playback(&config, Some(device_id), Some(body)).await?)
+        observer_id: &str,
+        connection_id: &str,
+    ) -> Result<RemoteCluster, DomainError> {
+        connect_state::register_observer(&self.internal_api, observer_id, connection_id, "Riff")
+            .await
     }
 
-    async fn player_play_uris(
+    async fn remote_unregister(
         &self,
-        device_id: &str,
-        uris: Vec<String>,
-        offset: usize,
+        observer_id: &str,
+        connection_id: &str,
     ) -> Result<(), DomainError> {
-        let config = self.config_or_err()?;
-        let mut offset_map = std::collections::HashMap::new();
-        offset_map.insert("position".to_string(), serde_json::json!(offset));
-        let body = sp::StartAUsersPlaybackRequest {
-            context_uri: None,
-            uris: Some(uris),
-            offset: Some(offset_map),
-            position_ms: None,
-        };
-        Ok(apis::player_api::start_a_users_playback(&config, Some(device_id), Some(body)).await?)
+        connect_state::unregister_observer(&self.internal_api, observer_id, connection_id).await
     }
 
-    async fn player_pause(&self, device_id: &str) -> Result<(), DomainError> {
-        let config = self.config_or_err()?;
-        Ok(apis::player_api::pause_a_users_playback(&config, Some(device_id)).await?)
+    async fn remote_command(
+        &self,
+        from: &str,
+        to: &str,
+        connection_id: &str,
+        command: RemoteCommand,
+    ) -> Result<(), DomainError> {
+        connect_state::command(&self.internal_api, from, to, connection_id, command).await
     }
 
-    async fn player_seek(&self, device_id: &str, position_ms: u32) -> Result<(), DomainError> {
-        let config = self.config_or_err()?;
-        Ok(
-            apis::player_api::seek_to_position_in_currently_playing_track(
-                &config,
-                position_ms as i32,
-                Some(device_id),
-            )
-            .await?,
-        )
+    async fn remote_transfer(
+        &self,
+        from: &str,
+        to: &str,
+        connection_id: &str,
+        playback: TransferPlayback,
+    ) -> Result<(), DomainError> {
+        connect_state::transfer(&self.internal_api, from, to, connection_id, playback).await
     }
 
-    async fn player_repeat(&self, device_id: &str, mode: RepeatMode) -> Result<(), DomainError> {
-        let config = self.config_or_err()?;
-        let state = repeat_mode_str(mode);
-        Ok(
-            apis::player_api::set_repeat_mode_on_users_playback(&config, state, Some(device_id))
-                .await?,
-        )
-    }
-
-    async fn player_shuffle(&self, device_id: &str, state: bool) -> Result<(), DomainError> {
-        let config = self.config_or_err()?;
-        Ok(
-            apis::player_api::toggle_shuffle_for_users_playback(&config, state, Some(device_id))
-                .await?,
-        )
-    }
-
-    async fn player_volume(&self, device_id: &str, volume_percent: u8) -> Result<(), DomainError> {
-        let config = self.config_or_err()?;
-        Ok(apis::player_api::set_volume_for_users_playback(
-            &config,
-            volume_percent as i32,
-            Some(device_id),
-        )
-        .await?)
+    async fn remote_volume(
+        &self,
+        from: &str,
+        to: &str,
+        connection_id: &str,
+        percent: u8,
+    ) -> Result<(), DomainError> {
+        connect_state::set_volume(&self.internal_api, from, to, connection_id, percent).await
     }
 }
 
@@ -831,5 +840,13 @@ mod tests {
             resource: "x".into()
         }
         .is_transient());
+    }
+
+    #[test]
+    fn tracks_that_dont_resolve_are_left_out() {
+        let tracks = parse_tracks_nullable(r#"{"tracks":[{"id":"a","name":"A"},null]}"#).unwrap();
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].as_ref().and_then(|t| t.id.as_deref()), Some("a"));
+        assert!(tracks[1].is_none());
     }
 }

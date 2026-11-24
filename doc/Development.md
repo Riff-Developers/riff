@@ -38,24 +38,23 @@ See [`Design.md`](Design.md) for the full data flow explanation.
 | Directory | Responsibility |
 | --- | -- |
 | `crates/` | Riff crates used by the main application - see below. |
-| `crates/riff-config/` | Shared constants and configuration values for the Riff workspace. |
+| `crates/riff-config/` | Configuration: tuned constants (`api.rs`), feature flags (`feature_flag/`), and the user settings in GSettings (`setting/`: the `Setting` names in `key.rs`, `SettingsStore` in `store/`). |
 | `crates/riff-auth/` | Authentication: OAuth2 (PKCE) flow and keyring-backed credential store. |
 | `crates/riff-api/` | Data layer for Riff, replacing the legacy API and caching code. |
 | `crates/riff-api/src/providers/` | Provider-neutral music service trait and per-vendor implementations. |
 | `crates/riff-api/src/providers/spotify/` | Spotify provider: domain types and Spotify-to-provider-neutral conversion. |
 | `crates/riff-api/src/http/` | Shared HTTP connection pool and retry logic. |
-| `crates/riff-core/` | App logic between the UI and the API layer, free of UI dependencies: navigation history and the play queue. |
-| `crates/riff-audio-engine/` | Audio engine: DSP chain between librespot and the audio backend (EQ, pitch, pan, mono, mix). |
+| `crates/riff-core/` | App logic between the UI and the API layer, free of UI dependencies: the app state and its reducer (`state`), events, navigation and browsing, screens (what each page loads), the library and pins, playback and playback across devices (`remote`), selection and session. |
+| `crates/riff-playback/` | This device's player: the librespot session, the temporary Connect receiver (both in `player/librespot/`) and the audio chain. When Soloist is picked on the sign-in page, it plays instead (`player/soloist/`), installed and updated through `engine/`; login itself is in `player/account.rs`. Reports `PlayerEvent`s and never names the UI. |
+| `crates/riff-mpris/` | MPRIS server over D-Bus: shows playback to the desktop (media controls, media keys) and turns its requests into commands. |
+| `crates/riff-audio-engine/` | Audio engine: the DSP chain (EQ, pitch, pan, mono, mix), with its settings shared as `Effects`. librespot runs it through `CaptureSink`; Soloist plays into the `riff-effects` PipeWire node (`EffectsNode`), which runs it and plays the result. |
 | `crates/riff-api/src/cache/` | Caching layer: disk TTL cache, texture LRU, domain object LRU. |
 | `src/` | Rust source code and bundled UI assets. |
-| `src/app/` | Core application logic and state. |
-| `src/app/state/` | Centralized application state and reducers. |
+| `src/app/` | The GTK app: wires the crates together and adapts their events to widgets (`remote_playback.rs`, `pin_store.rs`, `mpris.rs`, `player_events.rs`). |
+| `src/app/state/` | The app's wrapper around `riff_core::state`: `AppAction`/`AppEvent` add the UI-only actions and events. |
 | `src/app/models/` | Presentation models binding state to UI. |
-| `src/app/components/` | GTK widget wrappers and event listeners. |
+| `src/app/components/` | GTK widget wrappers and event listeners. `screen.rs` (`ScreenModel`) runs a core screen's requests for a page. |
 | `src/app/dev_tools/` | Dev menu (debug builds only). |
-| `src/connect/` | Spotify Connect device support. |
-| `src/player/` | librespot session and local playback management. |
-| `src/dbus/` | MPRIS / D-Bus integration. |
 | `data/` | Application data installed on the system (icons, desktop file, appstream, GSchema). |
 | `po/` | Translations (gettext). |
 | `scripts/` | Dependency setup and build helpers (`setup-dev.sh`, `build.sh`), plus the subfolders below. |
@@ -88,13 +87,19 @@ Riff is moving towards trunk-based development. Work merges into the `developmen
 
 Incomplete or experimental features are gated behind runtime feature flags rather than merged in a half-finished, always-on state. This keeps trunk-based development safe: a feature can land on the `development` branch while remaining hidden until it is ready.
 
-Flags are GSettings booleans defined in `src/feature_flags.rs` and toggled in the Settings dialog under the "Experiments" section.
+Flags are GSettings booleans defined in `crates/riff-config/src/feature_flag/mod.rs` and toggled in the Settings dialog under the "Experiments" section.
 
 ### Creating a New Feature Flag
 
-Adding a flag takes two coordinated changes: the Rust enum and the GSettings schema.
+Adding a flag takes three coordinated changes: the setting key, the `FeatureFlag` enum and the GSettings schema.
 
-1. In `src/feature_flags.rs`, add a variant to the `FeatureFlag` enum, add it to `FeatureFlag::ALL`, and fill in the `key()`, `title()`, and `description()` match arms:
+1. In `crates/riff-config/src/setting/key.rs`, add the key to the `settings!` list:
+
+   ```rust
+   FeatureMyFeature = "feature-my-feature",
+   ```
+
+2. In `crates/riff-config/src/feature_flag/mod.rs`, add a variant to the `FeatureFlag` enum, add it to `FeatureFlag::ALL`, and fill in the `setting()`, `title()`, and `description()` match arms:
 
    ```rust
    pub enum FeatureFlag {
@@ -102,11 +107,11 @@ Adding a flag takes two coordinated changes: the Rust enum and the GSettings sch
        MyFeature,
    }
 
-   // in key():   FeatureFlag::MyFeature => "feature-my-feature",
-   // in title(): FeatureFlag::MyFeature => "My Feature",
+   // in setting(): FeatureFlag::MyFeature => Setting::FeatureMyFeature,
+   // in title():   FeatureFlag::MyFeature => "My Feature",
    ```
 
-2. In `data/dev.diegovsky.Riff.gschema.xml`, add a matching boolean key (the name must equal `key()`):
+3. In `data/dev.diegovsky.Riff.gschema.xml`, add a matching boolean key. A test in `setting/key.rs` fails if the schema and the `Setting` list differ:
 
    ```xml
    <key name="feature-my-feature" type="b">
@@ -115,15 +120,15 @@ Adding a flag takes two coordinated changes: the Rust enum and the GSettings sch
    </key>
    ```
 
-3. Rebuild so the schema is recompiled (`./scripts/build.sh dev --install` runs `glib-compile-schemas` via meson's post-install). Then gate the feature in code with `is_enabled(FeatureFlag::MyFeature)`.
+4. Rebuild so the schema is recompiled (`./scripts/build.sh dev --install` runs `glib-compile-schemas` via meson's post-install). Then gate the feature in code with `is_enabled(FeatureFlag::MyFeature)`.
 
 ### Using Feature Flags in Code
 
 ```rust
-use crate::feature_flags::{is_enabled, FeatureFlag};
+use riff_config::feature_flag::{is_enabled, FeatureFlag};
 
-if is_enabled(FeatureFlag::DeviceSelector) {
-    // show device selector
+if is_enabled(FeatureFlag::PinnedObjects) {
+    // show pin actions
 }
 ```
 
@@ -132,8 +137,8 @@ if is_enabled(FeatureFlag::DeviceSelector) {
 Use `gsettings` to toggle flags without opening the Settings dialog:
 
 ```sh
-gsettings set dev.diegovsky.Riff feature-device-selector true
-gsettings set dev.diegovsky.Riff feature-pinned-objects false
+gsettings set dev.diegovsky.Riff feature-pinned-objects true
+gsettings set dev.diegovsky.Riff feature-normalisation false
 ```
 
 ## Testing and Debugging
@@ -239,7 +244,7 @@ To install manually, you need:
 
 ## Building
 
-`./scripts/build.sh` handles the common workflows (debug/release builds, install, test, clean) and takes flags like `--install`, `--no-check`, and `--features`. Run `./scripts/build.sh --help` for the full list of modes and options.
+`./scripts/build.sh` handles the common workflows (debug/release builds, install, test, clean) and takes flags like `--install`, `--no-check`, and `--features`. Run `./scripts/build.sh --help` for the full list of modes and options. To test first-run flows (sign-in, Soloist setup and pairing), `./scripts/build.sh dev --fresh-install` installs as if for the first time: after building, it removes your Riff data, caches, keyring items and settings without asking.
 
 Alternatives to the build script:
 

@@ -1,6 +1,9 @@
 [workspace]
-members = ["crates/riff-auth", "crates/riff-api", "crates/riff-audio-engine", "crates/riff-config", "crates/riff-core", "generated/spotify-api"]
+members = ["crates/riff-auth", "crates/riff-api", "crates/riff-audio-engine", "crates/riff-config", "crates/riff-core", "crates/riff-mpris", "crates/riff-playback", "generated/spotify-api"]
 resolver = "2"
+
+[workspace.lints.clippy]
+self_named_module_files = "warn"
 
 [package]
 name = "riff"
@@ -8,18 +11,22 @@ version = "26.10.0"
 edition = "2018"
 license = "MIT"
 
+[lints]
+workspace = true
+
 [dependencies]
 riff-api = { path = "crates/riff-api" }
 riff-audio-engine = { path = "crates/riff-audio-engine" }
 riff-auth = { path = "crates/riff-auth" }
 riff-config = { path = "crates/riff-config" }
 riff-core = { path = "crates/riff-core" }
+riff-mpris = { path = "crates/riff-mpris" }
+riff-playback = { path = "crates/riff-playback" }
+bitflags = "2"
 gio = "0.22"
 glib = "0.22.10"
 futures = "0.3.18"
 libc = "0.2"
-ref_filter_map = "1.0.1"
-zbus = { version = "5.12", default-features = false, features = ["tokio"] }
 int-enum = "1.2.0"
 lazy_static = "1.4.0"
 log = "0.4.17"
@@ -56,4 +63,5 @@ features = ["rt", "fs", "macros", "sync"]
 version = "0.8.0"
 features = ["gettext-system"]
 
-
+[dev-dependencies]
+riff-core = { path = "crates/riff-core", features = ["test-support"] }

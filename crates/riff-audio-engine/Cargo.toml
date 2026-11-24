@@ -7,8 +7,12 @@ description = "Riff's audio engine: the DSP pipeline between the decoder and the
 
 [dependencies]
 log = "0.4.17"
+pipewire = { version = "0.10", features = ["v0_3_49"] }
 
 [dependencies.librespot-playback]
 version = "0.8.0"
 default-features = false
 features = ["native-tls"]
+
+[lints]
+workspace = true

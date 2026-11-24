@@ -1,11 +1,10 @@
 use gettextrs::gettext;
-use gio::prelude::SettingsExt;
 use gtk::prelude::*;
 use libadwaita::prelude::*;
 
 use crate::settings::CloseWindowBehavior;
 
-use riff_config::settings::SETTINGS;
+use riff_config::SettingsStore;
 
 pub fn show(window: &libadwaita::ApplicationWindow) {
     let dialog = libadwaita::AlertDialog::new(
@@ -40,8 +39,9 @@ pub fn show(window: &libadwaita::ApplicationWindow) {
                     _ => return,
                 };
                 if remember_check.is_active() {
-                    let settings = gio::Settings::new(SETTINGS);
-                    let _ = settings.set_enum("close-window-behavior", behavior as i32);
+                    if let Err(e) = SettingsStore::new().set_close_window_behavior(behavior) {
+                        log::error!("Could not save what closing the window does: {e}");
+                    }
                 }
                 match behavior {
                     CloseWindowBehavior::StopAndQuit => {

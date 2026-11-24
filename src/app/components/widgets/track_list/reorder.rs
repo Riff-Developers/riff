@@ -209,6 +209,7 @@ impl<Model: TrackListModel + 'static> Reorder<Model> {
             return None;
         }
         debug!("reorder: dragging row {key}");
+        model.drag_started(&key);
         source.set_icon(
             Some(&gtk::WidgetPaintable::new(Some(row))),
             x as i32,

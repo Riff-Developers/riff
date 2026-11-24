@@ -11,8 +11,10 @@ use std::rc::Rc;
 
 mod panel_sizes;
 
+use super::components::{soloist_failed_text, soloist_updating_text, LoginWindow};
+use super::player_events::soloist_error;
 use super::state::{AppAction, AppModel};
-use crate::player::Command;
+use riff_playback::player::{soloist, Command, ThisComputer};
 
 /// Wire up the dev tools menu and all of its controls.
 ///
@@ -23,7 +25,9 @@ pub fn wire_dev_tools(
     builder: &gtk::Builder,
     sender: &UnboundedSender<AppAction>,
     player_command_sender: &UnboundedSender<Command>,
+    this_computer: &ThisComputer,
     model: &Rc<AppModel>,
+    login_window: &LoginWindow,
 ) {
     // The dev menu lives in its own blueprint (src/app/dev_tools.blp) so the
     // dev-only markup stays out of window.blp. Load it here and pack it into
@@ -34,6 +38,7 @@ pub fn wire_dev_tools(
         builder.object("navigation_panel_header").unwrap();
     navigation_panel_header.pack_start(&dev_menu);
     dev_menu.set_visible(true);
+    follow_sign_in(&dev_menu, &navigation_panel_header, login_window);
 
     let display = gdk::Display::default().unwrap();
 
@@ -220,8 +225,8 @@ pub fn wire_dev_tools(
     dev_dump_state.connect_clicked(move |_| {
         let state = model_for_dump.get_state();
         info!("==== APP STATE DUMP ====");
-        info!("logged-in user: {:?}", state.logged_user.user);
-        info!("saved playlists: {}", state.logged_user.playlists.len());
+        info!("logged-in user: {:?}", state.session.user);
+        info!("saved playlists: {}", state.library.playlists().len());
         info!(
             "browser screen: {:?} (history length {})",
             state.browser.current_screen(),
@@ -262,4 +267,80 @@ pub fn wire_dev_tools(
     dev_show_drm_dialog.connect_clicked(move |_| {
         let _ = app_sender.unbounded_send(AppAction::ShowDrmBlockedDialog);
     });
+
+    wire_soloist(&dev_builder, sender, this_computer);
+}
+
+fn wire_soloist(
+    dev_builder: &gtk::Builder,
+    sender: &UnboundedSender<AppAction>,
+    this_computer: &ThisComputer,
+) {
+    let button = |id: &str| -> gtk::Button { dev_builder.object(id).unwrap() };
+    let soloist = this_computer.soloist();
+
+    let check = soloist.clone();
+    button("dev_soloist_check_update").connect_clicked(move |_| check.check_for_update());
+
+    let out_of_date = soloist.clone();
+    button("dev_soloist_out_of_date").connect_clicked(move |_| out_of_date.make_out_of_date());
+
+    let kill = soloist.clone();
+    button("dev_soloist_kill").connect_clicked(move |_| kill.kill());
+
+    let block: gtk::Switch = dev_builder.object("dev_soloist_block_switch").unwrap();
+    block.connect_state_set(|_, blocked| {
+        warn!("[dev] Soloist downloads blocked: {blocked}");
+        soloist::download::block_downloads(blocked);
+        glib::Propagation::Proceed
+    });
+
+    type Text = fn() -> String;
+    let toasts: [(&str, Text); 3] = [
+        ("dev_soloist_toast_updating", soloist_updating_text),
+        ("dev_soloist_toast_failed", soloist_failed_text),
+        ("dev_soloist_toast_expires", || {
+            soloist_error(&soloist::SoloistError::ExpiresSoon { days: 5 })
+        }),
+    ];
+    for (id, text) in toasts {
+        let app_sender = sender.clone();
+        button(id).connect_clicked(move |_| {
+            let _ = app_sender.unbounded_send(AppAction::ShowNotification(text()));
+        });
+    }
+}
+
+fn follow_sign_in(
+    menu: &gtk::MenuButton,
+    main_header: &libadwaita::HeaderBar,
+    login_window: &LoginWindow,
+) {
+    let place = {
+        let (menu, main_header) = (menu.clone(), main_header.clone());
+        let login_header = login_window.header();
+        move |signing_in: bool| {
+            let to = if signing_in {
+                &login_header
+            } else {
+                &main_header
+            };
+            if menu.is_ancestor(to) {
+                return;
+            }
+            menu.popdown();
+            for from in [&main_header, &login_header] {
+                if menu.is_ancestor(from) {
+                    from.remove(&menu);
+                }
+            }
+            if signing_in {
+                to.pack_end(&menu);
+            } else {
+                to.pack_start(&menu);
+            }
+        }
+    };
+    place(login_window.is_visible());
+    login_window.connect_visible_notify(move |window| place(window.is_visible()));
 }

@@ -1,29 +1,25 @@
-// Model for the artist detail page.
-// Provides artist info, top tracks (as a playlist), album releases (as a card
-// list), follow/unfollow, and playback. On 400/404 from the API, navigates
-// back (the artist may not exist or be inaccessible).
-
 use std::ops::Deref;
 use std::rc::Rc;
 
+use crate::app::components::sync_cards;
 use crate::app::components::DetailsPageModel;
 use crate::app::components::{
-    dispatch_api_call, dispatch_api_read, labels, playing_card, CardListModel, HasHeaderBarModel,
-    HeaderImageShape, ImageShape, PageModel, PinnedPageModel, PlayingCard, TrackListModel,
+    dispatch_api_call, labels, playing_card, CardListModel, HasHeaderBarModel, HeaderImageShape,
+    ImageShape, PageModel, PinnedPageModel, PlayingCard, ScreenModel, TrackListModel,
 };
 use crate::app::models::*;
-use crate::app::state::Route;
-use crate::app::state::SelectionContext;
-use crate::app::state::CARD_BATCH_SIZE;
-use crate::app::state::{BrowserAction, BrowserEvent, PaginationTarget, SelectionState};
+use crate::app::state::PinKind;
+use crate::app::state::{ItemId, PageFields, Route, SelectionContext, SelectionState};
 use crate::app::{AppAction, AppEvent, AppModel, Dispatcher, ListStore, SongsSource};
-use crate::settings;
 use crate::{impl_source_page, impl_source_track_list, impl_track_list_model_base};
-use riff_api::DomainError;
+use riff_core::library;
+use riff_core::screens::ArtistScreen;
 
-/// Data model for the artist detail page. Composes `DetailsPageModel` via Deref.
 pub struct ArtistDetailsModel {
     base: DetailsPageModel,
+    screen: ScreenModel<ArtistScreen>,
+    releases: Rc<ListStore<CardModel>>,
+    top_tracks: SongListModel,
 }
 
 impl Deref for ArtistDetailsModel {
@@ -37,23 +33,44 @@ impl HasHeaderBarModel for ArtistDetailsModel {}
 
 impl ArtistDetailsModel {
     pub fn new(id: String, app_model: Rc<AppModel>, dispatcher: Dispatcher) -> Self {
+        let base = DetailsPageModel::new(id.clone(), Rc::clone(&app_model), dispatcher.clone());
+        let releases = Rc::new(ListStore::new());
+        let top_tracks = SongListModel::new(10);
+        let (cards, rows) = (Rc::clone(&releases), top_tracks.clone());
+        let screen = ScreenModel::new(
+            ArtistScreen::new(id, base.liked.clone()),
+            &app_model,
+            dispatcher,
+            move |screen, changed| {
+                if changed.contains(PageFields::CARDS) {
+                    let releases = &screen.releases.items;
+                    sync_cards(&cards, releases.iter().map(CardModel::from).collect());
+                }
+                if changed.contains(PageFields::TRACKS) {
+                    rows.clone().sync(&screen.top_tracks, None, true);
+                }
+            },
+        );
         Self {
-            base: DetailsPageModel::new(id, app_model, dispatcher),
+            base,
+            screen,
+            releases,
+            top_tracks,
         }
+    }
+
+    fn route(&self) -> Route {
+        Route::Artist(self.id.clone())
     }
 }
 
 impl PageModel for ArtistDetailsModel {
     fn get_title(&self) -> Option<String> {
-        self.app_model
-            .map_state_opt(|s| s.browser.artist_state(&self.id)?.artist.as_ref())
-            .map(|n| n.clone())
+        Some(self.screen.get().artist.as_ref()?.name.clone())
     }
 
     fn get_artwork(&self) -> Option<ImageSet> {
-        self.app_model
-            .map_state_opt(|s| s.browser.artist_state(&self.id)?.photo.as_ref())
-            .map(|p| p.clone())
+        Some(self.screen.get().artist.as_ref()?.art.clone())
     }
 
     fn get_caption(&self) -> Option<String> {
@@ -69,82 +86,19 @@ impl PageModel for ArtistDetailsModel {
     }
 
     fn load_page_info(&self) {
-        let api = self.app_model.api();
-
-        let id = self.id.clone();
-        let info_api = api.clone();
-        dispatch_api_read(&self.dispatcher, move |tag| async move {
-            match info_api.get_artist(&id, tag).await {
-                Ok(artist) => Ok(BrowserAction::SetArtistInfo(Box::new(artist)).into()),
-                Err(DomainError::ClientError { status: 400, .. })
-                | Err(DomainError::NotFound { .. }) => {
-                    Ok(BrowserAction::NavigationLeave(Route::Artist(id)).into())
-                }
-                Err(e) => Err(e),
-            }
-        });
-
-        // Initial album releases (the card list).
-        let id = self.id.clone();
-        let releases_api = api.clone();
-        dispatch_api_read(&self.dispatcher, move |tag| async move {
-            releases_api
-                .get_artist_albums(&id, 0, CARD_BATCH_SIZE, tag)
-                .await
-                .map(|page| BrowserAction::SetArtistReleases(id, page.items).into())
-        });
-
-        // Top tracks (the playlist).
-        let id = self.id.clone();
-        let tracks_api = api.clone();
-        dispatch_api_read(&self.dispatcher, move |tag| async move {
-            tracks_api
-                .get_artist_top_tracks(&id, tag)
-                .await
-                .map(|tracks| BrowserAction::SetArtistTopTracks(id, tracks).into())
-        });
-
-        // Followed status
-        let id = self.id.clone();
-        dispatch_api_read(&self.dispatcher, move |tag| async move {
-            let is_followed = api.check_following_artist(&id, tag).await.unwrap_or(false);
-            Ok(BrowserAction::SetArtistFollowedStatus(id, is_followed).into())
-        });
+        self.screen.open();
     }
 
     fn load_more(&self) {
-        let api = self.app_model.api();
-        let state = self.app_model.get_state();
-        let Some(next_page) = state
-            .browser
-            .artist_state(&self.id)
-            .map(|s| s.next_page.clone())
-        else {
-            return;
-        };
-        drop(state);
+        self.screen.load_more();
+    }
 
-        let Some(offset) = next_page.next_offset else {
-            return;
-        };
-        let id = next_page.data;
-        let batch_size = next_page.batch_size;
-
-        self.app_model.update_state(
-            BrowserAction::ConsumeNextPage(PaginationTarget::ArtistReleases(id.clone())).into(),
-        );
-
-        dispatch_api_read(&self.dispatcher, move |tag| async move {
-            api.get_artist_albums(&id, offset, batch_size, tag)
-                .await
-                .map(|page| BrowserAction::AppendArtistReleases(id, page.items).into())
-        });
+    fn apply_event(&self, event: &AppEvent) {
+        self.screen.apply(event);
     }
 
     fn is_loaded(&self) -> bool {
-        self.app_model
-            .map_state_opt(|s| s.browser.artist_state(&self.id)?.artist.as_ref())
-            .is_some()
+        self.screen.get().artist.is_some()
     }
 
     impl_source_page!();
@@ -162,12 +116,7 @@ impl PageModel for ArtistDetailsModel {
     }
 
     fn is_liked(&self) -> bool {
-        self.app_model
-            .get_state()
-            .browser
-            .artist_state(&self.id)
-            .map(|s| s.is_followed)
-            .unwrap_or(false)
+        self.screen.get().followed
     }
 
     fn toggle_like(&self) {
@@ -175,45 +124,28 @@ impl PageModel for ArtistDetailsModel {
         let is_followed = self.is_liked();
         let api = self.app_model.api();
 
-        let summary = {
-            let state = self.app_model.get_state();
-            state.browser.artist_state(&id).map(|artist| Artist {
-                rri: ResourceId {
-                    id: id.clone(),
-                    ..Default::default()
-                },
-                name: artist.artist.clone().unwrap_or_default(),
-                art: artist.photo.clone().unwrap_or_default(),
-                ..Default::default()
-            })
-        };
-
         dispatch_api_call(&self.dispatcher, move || async move {
-            if is_followed {
-                api.unfollow_artists(&id).await?;
-                Ok(BrowserAction::UnfollowArtist(id).into())
-            } else {
-                api.follow_artists(&id).await?;
-                let summary = summary.unwrap_or_else(|| Artist {
-                    rri: ResourceId {
-                        id: id.clone(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                });
-                Ok(BrowserAction::FollowArtist(summary).into())
-            }
+            Ok(library::set_saved(&api, ItemId::Artist(id), !is_followed)
+                .await?
+                .into())
         });
     }
 
     fn should_refresh_details(&self, event: &AppEvent) -> bool {
-        matches!(event, AppEvent::BrowserEvent(BrowserEvent::ArtistDetailsUpdated(id)) if id == &self.id)
+        event.page_loaded(&self.route()).is_some()
+    }
+
+    fn should_refresh_liked(&self, event: &AppEvent) -> bool {
+        event
+            .page_loaded(&self.route())
+            .is_some_and(|loaded| loaded.contains(PageFields::SAVED))
+            || event.saved(&ItemId::Artist(self.id.clone())).is_some()
     }
 }
 
 impl PinnedPageModel for ArtistDetailsModel {
-    fn pin_kind(&self) -> settings::PinnedKind {
-        settings::PinnedKind::Artist
+    fn pin_kind(&self) -> PinKind {
+        PinKind::Artist
     }
 
     fn supports_pin_button(&self) -> bool {
@@ -227,8 +159,7 @@ impl CardListModel for ArtistDetailsModel {
     }
 
     fn get_store(&self) -> Option<impl Deref<Target = ListStore<CardModel>> + '_> {
-        self.app_model
-            .map_state_opt(|s| Some(&s.browser.artist_state(&self.id)?.albums))
+        Some(self.releases.as_ref())
     }
 
     fn load_more(&self) {
@@ -237,10 +168,7 @@ impl CardListModel for ArtistDetailsModel {
     fn refresh(&self) {}
 
     fn has_items(&self) -> bool {
-        self.app_model
-            .map_state_opt(|s| Some(&s.browser.artist_state(&self.id)?.albums))
-            .map(|s| s.len() > 0)
-            .unwrap_or(false)
+        !self.releases.is_empty()
     }
 
     fn open_item(&self, id: String) {
@@ -258,13 +186,7 @@ impl CardListModel for ArtistDetailsModel {
 
 impl TrackListModel for ArtistDetailsModel {
     fn song_list_model(&self) -> SongListModel {
-        self.app_model
-            .get_state()
-            .browser
-            .artist_state(&self.id)
-            .expect("illegal attempt to read artist_state")
-            .top_tracks
-            .clone()
+        self.top_tracks.clone()
     }
 
     fn show_album_column(&self) -> bool {

@@ -1,7 +1,3 @@
-//! ApiService - orchestrates caching around domain calls.
-//!
-//! Tier order: memory LRU -> disk cache -> network.
-
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,6 +10,7 @@ use riff_config::api::{
 };
 
 use futures::future::join_all;
+use futures::StreamExt;
 use gdk::prelude::TextureExt;
 
 use crate::cache::{CacheKey, DiskCache, Store, TextureCache};
@@ -21,6 +18,10 @@ use crate::error::DomainError;
 use crate::http;
 use crate::models::*;
 use crate::providers::MusicProvider;
+use crate::remote::{
+    ContentUris, ProviderCapabilities, RemoteCluster, RemoteCommand, RemoteEndpoint, RemotePush,
+    TransferPlayback,
+};
 use crate::scheduler::{Admission, AdmissionQueue, Lane, Load, Slot};
 
 const PLAYLIST_ITEMS_PAGE: usize = 50;
@@ -45,6 +46,16 @@ const COVER_POLL_ATTEMPTS: u32 = 8;
 struct PersistedPage {
     pages: Vec<(usize, Vec<serde_json::Value>)>,
     total: usize,
+}
+
+const MAX_TRACKS_PER_REQUEST: usize = 50;
+/// Disk cache reads in flight at once while looking up tracks.
+const TRACK_DISK_READS: usize = 16;
+
+#[derive(Debug, Default)]
+pub struct TrackLookup {
+    pub found: HashMap<String, Track>,
+    pub error: Option<DomainError>,
 }
 
 pub struct ApiService {
@@ -634,6 +645,77 @@ impl ApiService {
         self.provider.get_current_user().await
     }
 
+    pub async fn get_tracks(&self, ids: &[String], load: Load) -> TrackLookup {
+        let mut found: HashMap<String, Track> = HashMap::new();
+        let mut unread: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for id in ids {
+            if !seen.insert(id) {
+                continue;
+            }
+            match self
+                .json_cache
+                .get_single::<Track>(&CacheKey::Track(id.clone()))
+            {
+                Some(track) => {
+                    found.insert(id.clone(), track);
+                }
+                None => unread.push(id.clone()),
+            }
+        }
+        let read: Vec<Option<Track>> = futures::stream::iter(unread.clone())
+            .map(|id| async move {
+                let key = CacheKey::Track(id);
+                let disk = self.api_disk.read(&key.disk_key()).await;
+                disk.filter(|entry| matches!(entry.state, crate::cache::disk::EntryState::Fresh))
+                    .and_then(|entry| serde_json::from_slice::<Track>(&entry.data).ok())
+            })
+            .buffered(TRACK_DISK_READS)
+            .collect()
+            .await;
+        let mut missing: Vec<String> = Vec::new();
+        for (id, track) in unread.into_iter().zip(read) {
+            match track {
+                Some(track) => {
+                    self.json_cache
+                        .insert_single(&CacheKey::Track(id.clone()), track.clone());
+                    found.insert(id, track);
+                }
+                None => missing.push(id),
+            }
+        }
+
+        let mut error = None;
+        for chunk in missing.chunks(MAX_TRACKS_PER_REQUEST) {
+            let fetched = match self.admit_read(load).await {
+                Ok(_slot) => self.provider.get_tracks(chunk).await,
+                Err(e) => Err(e),
+            };
+            let fetched = match fetched {
+                Ok(fetched) => fetched,
+                Err(e) => {
+                    self.handle_auth_error(&e);
+                    error = Some(e);
+                    break;
+                }
+            };
+            for (id, track) in fetched {
+                let key = CacheKey::Track(id.clone());
+                self.json_cache.insert_single(&key, track.clone());
+                if let Ok(bytes) = serde_json::to_vec(&track) {
+                    let disk = self.api_disk.clone();
+                    let disk_key = key.disk_key();
+                    tokio::spawn(async move { disk.write_default(&disk_key, &bytes, None).await });
+                }
+                found.insert(id, track);
+            }
+        }
+
+        self.annotate_saved(found.values_mut().collect(), load)
+            .await;
+        TrackLookup { found, error }
+    }
+
     pub async fn get_track(&self, id: &str, load: Load) -> Result<Track, DomainError> {
         let mut track = {
             let _slot = self.admit_read(load).await?;
@@ -1045,86 +1127,83 @@ impl ApiService {
         updated
     }
 
-    pub async fn get_devices(&self, load: Load) -> Result<Vec<Device>, DomainError> {
-        let _slot = self.admit_read(load).await?;
-        self.provider.get_devices().await
+    pub fn capabilities(&self) -> ProviderCapabilities {
+        self.provider.capabilities()
     }
 
-    pub async fn get_player_queue(&self, load: Load) -> Result<Queue, DomainError> {
-        let mut queue = {
-            let _slot = self.admit_read(load).await?;
-            self.provider.get_player_queue().await?
-        };
-        let tracks = queue.currently_playing.iter_mut().chain(&mut queue.items);
-        self.annotate_saved(tracks.collect(), load).await;
-        Ok(queue)
+    pub fn uris(&self) -> ContentUris {
+        self.provider.uris()
     }
 
-    pub async fn get_player_state(&self, load: Load) -> Result<PlayerState, DomainError> {
-        let _slot = self.admit_read(load).await?;
-        self.provider.get_player_state().await
+    pub async fn remote_endpoint(&self) -> Result<RemoteEndpoint, DomainError> {
+        self.provider.remote_endpoint().await
     }
 
-    pub async fn player_resume(&self, device_id: &str) -> Result<(), DomainError> {
-        let _lane = self.player_lane.enter().await;
-        self.provider.player_resume(device_id).await
+    pub fn parse_remote_push(&self, text: &str) -> RemotePush {
+        self.provider.parse_remote_push(text)
     }
 
-    pub async fn player_play_in_context(
+    pub fn remote_keepalive(&self) -> &'static str {
+        self.provider.remote_keepalive()
+    }
+
+    pub async fn remote_register(
         &self,
-        device_id: &str,
-        context_uri: &str,
-        offset: usize,
-    ) -> Result<(), DomainError> {
-        let _lane = self.player_lane.enter().await;
+        observer_id: &str,
+        connection_id: &str,
+    ) -> Result<RemoteCluster, DomainError> {
         self.provider
-            .player_play_in_context(device_id, context_uri, offset)
+            .remote_register(observer_id, connection_id)
             .await
     }
 
-    pub async fn player_play_uris(
+    pub async fn remote_unregister(
         &self,
-        device_id: &str,
-        uris: Vec<String>,
-        offset: usize,
+        observer_id: &str,
+        connection_id: &str,
     ) -> Result<(), DomainError> {
-        let _lane = self.player_lane.enter().await;
         self.provider
-            .player_play_uris(device_id, uris, offset)
+            .remote_unregister(observer_id, connection_id)
             .await
     }
 
-    pub async fn player_pause(&self, device_id: &str) -> Result<(), DomainError> {
-        let _lane = self.player_lane.enter().await;
-        self.provider.player_pause(device_id).await
-    }
-
-    pub async fn player_seek(&self, device_id: &str, position_ms: u32) -> Result<(), DomainError> {
-        let _lane = self.player_lane.enter().await;
-        self.provider.player_seek(device_id, position_ms).await
-    }
-
-    pub async fn player_repeat(
+    pub async fn remote_command(
         &self,
-        device_id: &str,
-        mode: RepeatMode,
+        from: &str,
+        to: &str,
+        connection_id: &str,
+        command: RemoteCommand,
     ) -> Result<(), DomainError> {
         let _lane = self.player_lane.enter().await;
-        self.provider.player_repeat(device_id, mode).await
+        self.provider
+            .remote_command(from, to, connection_id, command)
+            .await
     }
 
-    pub async fn player_shuffle(&self, device_id: &str, state: bool) -> Result<(), DomainError> {
-        let _lane = self.player_lane.enter().await;
-        self.provider.player_shuffle(device_id, state).await
-    }
-
-    pub async fn player_volume(
+    pub async fn remote_transfer(
         &self,
-        device_id: &str,
-        volume_percent: u8,
+        from: &str,
+        to: &str,
+        connection_id: &str,
+        playback: TransferPlayback,
     ) -> Result<(), DomainError> {
         let _lane = self.player_lane.enter().await;
-        self.provider.player_volume(device_id, volume_percent).await
+        self.provider
+            .remote_transfer(from, to, connection_id, playback)
+            .await
+    }
+
+    pub async fn remote_volume(
+        &self,
+        from: &str,
+        to: &str,
+        connection_id: &str,
+        percent: u8,
+    ) -> Result<(), DomainError> {
+        let _lane = self.player_lane.enter().await;
+        self.provider
+            .remote_volume(from, to, connection_id, percent)
+            .await
     }
 
     pub async fn get_followed_artists(

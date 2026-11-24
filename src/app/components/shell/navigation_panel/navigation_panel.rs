@@ -10,8 +10,8 @@ use super::{
     PINNED_SECTION, SAVED_PLAYLISTS_SECTION,
 };
 use crate::app::components::PlaylistDialog;
-use crate::app::state::{HomePage, PlaybackEvent, Route, Transition};
-use crate::app::{AppEvent, BrowserEvent, Component, EventListener};
+use crate::app::state::{HomePage, LibraryFields, PlaybackFields, Route, Transition};
+use crate::app::{AppEvent, Component, EventListener};
 
 pub struct NavigationPanel {
     listbox: gtk::ListBox,
@@ -77,8 +77,6 @@ impl NavigationPanel {
         ));
 
         let context_menu = gtk::PopoverMenu::from_model(None::<&gio::MenuModel>);
-        // Parent the popover to the Box above the ScrolledWindow to avoid
-        // inheriting any scroll constraints that would add a scrollbar.
         let navigation_panel_box = listbox
             .ancestor(gtk::ScrolledWindow::static_type())
             .and_then(|sw| sw.parent())
@@ -129,7 +127,6 @@ impl NavigationPanel {
                 context_menu.insert_action_group(prefix, Some(&actions));
                 context_menu.set_menu_model(Some(&menu));
 
-                // Translate coordinates from listbox space to the popover parent (navigation panel Box) space
                 let popover_parent = context_menu.parent().unwrap();
                 let translated = listbox
                     .compute_point(
@@ -164,20 +161,6 @@ impl NavigationPanel {
             }
         ));
         listbox.add_controller(long_press);
-
-        let scrolled_window = listbox
-            .ancestor(gtk::ScrolledWindow::static_type())
-            .and_downcast::<gtk::ScrolledWindow>()
-            .unwrap();
-        scrolled_window.connect_edge_reached(clone!(
-            #[weak]
-            model,
-            move |_, pos| {
-                if pos == gtk::PositionType::Bottom {
-                    model.load_more_playlists();
-                }
-            }
-        ));
 
         let num_fixed_entries = list_store.n_items();
 
@@ -251,7 +234,6 @@ impl NavigationPanel {
         row.upcast()
     }
 
-    // The Now Playing row's icon (see app.css)
     fn update_playing(&self) {
         if self.model.is_playing() {
             self.listbox.remove_css_class("now-playing--idle");
@@ -289,21 +271,21 @@ impl Component for NavigationPanel {
 
 impl EventListener for NavigationPanel {
     fn on_event(&mut self, event: &AppEvent) {
-        match event {
-            AppEvent::BrowserEvent(
-                BrowserEvent::SavedPlaylistsUpdated | BrowserEvent::PinnedPlaylistsUpdated,
-            ) => self.update_playlists_in_navigation_panel(),
-            AppEvent::BrowserEvent(BrowserEvent::NavigationChanged(Transition {
-                to: Route::Home(page),
-                ..
-            })) => self.select_home_page(*page),
-            AppEvent::PlaybackEvent(
-                PlaybackEvent::PlaybackPaused
-                | PlaybackEvent::PlaybackResumed
-                | PlaybackEvent::PlaybackStopped
-                | PlaybackEvent::TrackChanged(_),
-            ) => self.update_playing(),
-            _ => {}
+        if event.library_changed(LibraryFields::PLAYLISTS | LibraryFields::PINS) {
+            self.update_playlists_in_navigation_panel();
+        }
+        if let Some(Transition {
+            to: Route::Home(page),
+            ..
+        }) = event.transition()
+        {
+            self.select_home_page(*page);
+        }
+        if event.playback().is_some_and(|p| {
+            p.changed
+                .intersects(PlaybackFields::STATUS | PlaybackFields::TRACK)
+        }) {
+            self.update_playing();
         }
     }
 }

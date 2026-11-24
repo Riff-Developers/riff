@@ -9,13 +9,13 @@ use crate::app::models::RepeatMode;
 use riff_api::models::is_resource_url;
 use riff_api::ApiService;
 
-use crate::app::load;
+use riff_core::load;
 use std::sync::Arc;
 
 use super::playback_controls::PlaybackControlsWidget;
 use super::playback_info::PlaybackInfoWidget;
+use crate::app::components::DeviceSelectorWidget;
 
-/// Matches the artwork size request in playback_info.blp.
 const ARTWORK_SIZE: i32 = 56;
 
 mod imp {
@@ -51,6 +51,9 @@ mod imp {
 
         #[template_child]
         pub queue_button: TemplateChild<gtk::ToggleButton>,
+
+        #[template_child]
+        pub device_selector: TemplateChild<DeviceSelectorWidget>,
 
         pub clock: Clock,
     }
@@ -113,6 +116,10 @@ glib::wrapper! {
 }
 
 impl PlaybackWidget {
+    pub fn device_selector(&self) -> DeviceSelectorWidget {
+        self.imp().device_selector.clone()
+    }
+
     pub fn set_title_and_artist(&self, title: &str, artist: &str) {
         let widget = self.imp();
         widget.now_playing.set_visible(true);
@@ -139,7 +146,6 @@ impl PlaybackWidget {
             return;
         }
         let weak_self = self.downgrade();
-        // Not part of any page, so it rides the current epoch.
         let tag = load::transport();
         let size = decode_px(ARTWORK_SIZE);
         glib::MainContext::default().spawn_local(async move {
@@ -310,11 +316,6 @@ impl PlaybackWidget {
         let debouncer = Debouncer::new();
         let widget = self.imp();
         widget.volume_slider.connect_value_changed(move |scale| {
-            // Debounce dispatch: a single mouse-wheel flick emits a burst of
-            // high-resolution scroll deltas, each firing `value_changed`.
-            // Without this, every delta would fan out to the mixer, the Web
-            // API, dconf and an MPRIS `PropertiesChanged` D-Bus signal, which
-            // can flood GNOME Shell's media controls and hang the session.
             let value = scale.value();
             let f = f.clone();
             debouncer.debounce(100, move || f(value));

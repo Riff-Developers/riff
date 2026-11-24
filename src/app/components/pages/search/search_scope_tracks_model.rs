@@ -1,24 +1,24 @@
-// Playlist adapter for the search page's scoped track view (Songs filter).
-// Reads the single `SearchState`: the query and scoped track results.
-
 use gio::SimpleActionGroup;
-use std::cell::Ref;
 use std::ops::Deref;
 use std::rc::Rc;
 
 use crate::impl_track_list_model_base;
 
 use crate::app::components::DetailsPageModel;
-use crate::app::components::{source_context_actions, track_menu, TrackListModel};
+use crate::app::components::{source_play_context, track_menu, ScreenModel, TrackListModel};
 use crate::app::models::*;
-use crate::app::state::SelectionContext;
-use crate::app::state::{SearchState, SelectionState, CARD_BATCH_SIZE};
-use crate::app::{AppAction, AppModel, Dispatcher, SongsSource};
+use crate::app::state::{LikedTracks, Route, SelectionState, PAGE_SIZE};
+use crate::app::state::{PlayContext, SelectionContext};
+use crate::app::{AppEvent, AppModel, Dispatcher, SongsSource};
+
+use riff_core::screens::SearchScreen;
 
 use super::load_more_scope;
 
 pub struct SearchScopeTracksModel {
     base: DetailsPageModel,
+    screen: ScreenModel<SearchScreen>,
+    songs: SongListModel,
 }
 
 impl Deref for SearchScopeTracksModel {
@@ -29,30 +29,51 @@ impl Deref for SearchScopeTracksModel {
 }
 
 impl SearchScopeTracksModel {
-    pub fn new(app_model: Rc<AppModel>, dispatcher: Dispatcher) -> Self {
+    pub fn new(
+        app_model: Rc<AppModel>,
+        dispatcher: Dispatcher,
+        screen: ScreenModel<SearchScreen>,
+        liked: LikedTracks,
+    ) -> Self {
+        let mut base = DetailsPageModel::new_without_id(app_model, dispatcher);
+        base.liked = liked;
         Self {
-            base: DetailsPageModel::new_without_id(app_model, dispatcher),
+            base,
+            screen,
+            songs: SongListModel::new(PAGE_SIZE as u32),
         }
     }
 
-    fn search_state(&self) -> Option<Ref<'_, SearchState>> {
-        self.app_model.map_state_opt(|s| s.browser.search_state())
+    fn sync_songs(&self) {
+        let screen = self.screen.get();
+        let tracks = &screen.scope.tracks.items;
+        self.songs.clone().sync(tracks, None, screen.is_complete());
     }
 
     pub fn get_query(&self) -> Option<String> {
-        self.search_state().map(|s| s.query.clone())
+        Some(
+            self.app_model
+                .get_state()
+                .browser
+                .search_query()
+                .to_string(),
+        )
     }
 
     pub fn load_more(&self) {
-        load_more_scope(&self.app_model, &self.dispatcher, SearchType::Tracks);
+        load_more_scope(&self.app_model, &self.screen, SearchType::Track);
     }
 }
 
 impl TrackListModel for SearchScopeTracksModel {
+    fn apply_event(&self, event: &AppEvent) {
+        if event.search().is_some() || event.page_loaded(&Route::Search).is_some() {
+            self.sync_songs();
+        }
+    }
+
     fn song_list_model(&self) -> SongListModel {
-        self.search_state()
-            .map(|s| s.scope_tracks.clone())
-            .unwrap_or_else(|| SongListModel::new(CARD_BATCH_SIZE as u32))
+        self.songs.clone()
     }
 
     fn autoscroll_to_playing(&self) -> bool {
@@ -73,14 +94,18 @@ impl TrackListModel for SearchScopeTracksModel {
         self.enable_selection_with_context(SelectionContext::Default)
     }
 
-    fn play_song_at(&self, pos: usize, id: &str) {
-        self.play_in_context(TrackListModel::context_actions(self, pos), id);
+    fn play_song_at(&self, _pos: usize, id: &str) {
+        self.play_in_context(TrackListModel::play_context(self), id);
     }
 
-    fn context_actions(&self, pos: usize) -> Option<Vec<AppAction>> {
+    fn play_context(&self) -> Option<PlayContext> {
         let query = self.get_query().unwrap_or_default();
         let songs = TrackListModel::song_list_model(self);
-        source_context_actions(SongsSource::Search(query.clone()), Some(query), &songs, pos)
+        Some(source_play_context(
+            SongsSource::Search(query.clone()),
+            Some(query),
+            &songs,
+        ))
     }
 
     fn actions_for(&self, _row: &SongModel, song: &Track) -> Option<SimpleActionGroup> {

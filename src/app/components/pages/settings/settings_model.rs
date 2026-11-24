@@ -1,12 +1,15 @@
-use crate::app::state::{PlaybackAction, SettingsAction};
+use crate::app::state::Action;
+use crate::app::state::PlaybackAction;
 use crate::app::{AppAction, AppModel, Dispatcher};
 use crate::settings::RiffSettings;
 use gettextrs::gettext;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 pub struct SettingsModel {
     app_model: Rc<AppModel>,
     dispatcher: Dispatcher,
+    applied: RefCell<RiffSettings>,
 }
 
 impl SettingsModel {
@@ -14,16 +17,25 @@ impl SettingsModel {
         Self {
             app_model,
             dispatcher,
+            applied: RefCell::new(RiffSettings::new_from_gsettings().unwrap_or_default()),
         }
     }
 
-    pub fn stop_player(&self) {
-        self.dispatcher.dispatch(PlaybackAction::Stop.into());
-    }
-
-    pub fn set_settings(&self) {
-        self.dispatcher
-            .dispatch(SettingsAction::ChangeSettings.into());
+    /// Reloads the player if a setting changed that it can't pick up live.
+    /// EQ, mono, pan and pitch are pushed live by the GSettings watcher in
+    /// PlayerNotifier and never need a reload.
+    pub fn apply_settings(&self) {
+        let new_settings = RiffSettings::new_from_gsettings().unwrap_or_default();
+        let applied = self.applied.replace(new_settings.clone());
+        if applied
+            .player_settings
+            .requires_reload(&new_settings.player_settings)
+        {
+            self.dispatcher.dispatch_many(vec![
+                PlaybackAction::Stop.into(),
+                AppAction::Core(Action::ReloadPlayerSettings),
+            ]);
+        }
     }
 
     pub fn show_restart_required(&self) {
@@ -37,15 +49,15 @@ impl SettingsModel {
         let dispatcher = self.dispatcher.clone();
         tokio::spawn(async move {
             api.clear_user_cache().await;
-            crate::player::clear_audio_cache();
+            riff_playback::player::clear_audio_cache();
             // Translators: Toast shown after the user clears the cache in settings.
             dispatcher.dispatch(AppAction::ShowNotification(gettext("Cache cleared")));
         });
     }
 
-    pub fn settings(&self) -> RiffSettings {
-        let state = self.app_model.get_state();
-        state.settings.settings.clone()
+    /// The settings the player on this computer supports.
+    pub fn settings_support(&self) -> riff_config::SettingsSupport {
+        riff_playback::player::Engine::chosen().settings_support()
     }
 
     /// Whether the logged-in Spotify account has locked its explicit content

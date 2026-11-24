@@ -20,6 +20,9 @@ pub use window::*;
 pub mod clipboard_import;
 pub use clipboard_import::*;
 
+pub mod engine_setup;
+pub use engine_setup::EngineSetup;
+
 pub mod layout;
 pub use layout::WindowLayout;
 

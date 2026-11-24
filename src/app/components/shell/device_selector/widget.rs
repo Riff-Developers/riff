@@ -1,17 +1,16 @@
-// `ConnectDevice` is the data-layer device type, aliased to avoid clashing with
-// the app-state `Device` enum imported below.
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::time::Duration;
+
+use crate::app::components::labels;
 use crate::app::models::{Device as ConnectDevice, DeviceKind};
-use crate::app::state::Device;
-use gdk::prelude::FromVariant;
+use crate::app::state::{DeviceEntry, DeviceList};
 use gettextrs::gettext;
-use gio::{Action, SimpleAction, SimpleActionGroup};
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::CompositeTemplate;
 
-const ACTIONS: &str = "devices";
-const CONNECT_ACTION: &str = "connect";
-const REFRESH_ACTION: &str = "refresh";
+const VOLUME_DEBOUNCE: Duration = Duration::from_millis(250);
 
 mod imp {
 
@@ -21,24 +20,35 @@ mod imp {
     #[template(resource = "/dev/diegovsky/Riff/components/device_selector.ui")]
     pub struct DeviceSelectorWidget {
         #[template_child]
-        pub button_content: TemplateChild<libadwaita::ButtonContent>,
+        pub popover: TemplateChild<gtk::Popover>,
 
         #[template_child]
-        pub popover: TemplateChild<gtk::PopoverMenu>,
+        pub current_icon: TemplateChild<gtk::Image>,
 
         #[template_child]
-        pub custom_content: TemplateChild<gtk::Box>,
+        pub current_name: TemplateChild<gtk::Label>,
 
         #[template_child]
-        pub devices: TemplateChild<gtk::Box>,
+        pub current_subtitle: TemplateChild<gtk::Label>,
 
         #[template_child]
-        pub this_device_button: TemplateChild<gtk::CheckButton>,
+        pub volume_box: TemplateChild<gtk::Box>,
 
         #[template_child]
-        pub menu: TemplateChild<gio::MenuModel>,
+        pub volume_scale: TemplateChild<gtk::Scale>,
 
-        pub action_group: SimpleActionGroup,
+        #[template_child]
+        pub devices_list: TemplateChild<gtk::ListBox>,
+
+        #[template_child]
+        pub empty_label: TemplateChild<gtk::Label>,
+
+        #[template_child]
+        pub spinner: TemplateChild<gtk::Spinner>,
+
+        pub row_targets: RefCell<Vec<Option<String>>>,
+        pub syncing_volume: Cell<bool>,
+        pub pending_volume: RefCell<Option<glib::SourceId>>,
     }
 
     #[glib::object_subclass]
@@ -60,31 +70,29 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
 
-            let popover: &gtk::PopoverMenu = &self.popover;
-            popover.set_menu_model(Some(&*self.menu));
-            popover.add_child(&*self.custom_content, "custom_content");
+            let popover: &gtk::Popover = &self.popover;
             popover.set_parent(&*self.obj());
             popover.set_autohide(true);
 
-            let this_device = &*self.this_device_button;
-            this_device.set_action_name(Some(&format!("{}.{}", ACTIONS, CONNECT_ACTION)));
-            this_device.set_action_target_value(Some(&Option::<String>::None.to_variant()));
-
-            self.obj()
-                .insert_action_group(ACTIONS, Some(&self.action_group));
             self.obj().connect_clicked(clone!(
                 #[weak]
                 popover,
-                move |_| {
-                    popover.set_visible(true);
-                    popover.present();
-                    popover.grab_focus();
-                }
+                move |_| popover.popup()
             ));
+        }
+
+        fn dispose(&self) {
+            self.popover.unparent();
         }
     }
 
-    impl WidgetImpl for DeviceSelectorWidget {}
+    impl WidgetImpl for DeviceSelectorWidget {
+        fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
+            self.parent_size_allocate(width, height, baseline);
+            self.popover.present();
+        }
+    }
+
     impl ButtonImpl for DeviceSelectorWidget {}
 }
 
@@ -93,84 +101,163 @@ glib::wrapper! {
         @implements gtk::Accessible, gtk::Actionable, gtk::Buildable, gtk::ConstraintTarget;
 }
 
+fn icon_for(kind: DeviceKind) -> &'static str {
+    match kind {
+        DeviceKind::Phone => "phone-symbolic",
+        DeviceKind::Computer => "computer-symbolic",
+        DeviceKind::Speaker => "audio-speakers-symbolic",
+        DeviceKind::Tv => "tv-symbolic",
+        DeviceKind::Other => "audio-x-generic-symbolic",
+    }
+}
+
+fn kind_label(kind: DeviceKind) -> String {
+    match kind {
+        DeviceKind::Phone => gettext("Phone"),
+        DeviceKind::Computer => gettext("Computer"),
+        DeviceKind::Speaker => gettext("Speaker"),
+        DeviceKind::Tv => gettext("TV"),
+        DeviceKind::Other => gettext("Device"),
+    }
+}
+
+fn device_row(entry: &DeviceEntry) -> gtk::ListBoxRow {
+    let (icon, label) = match entry {
+        DeviceEntry::ThisDevice => ("computer-symbolic", gettext("This Device")),
+        DeviceEntry::Other(ConnectDevice { kind, label, .. }) => (icon_for(*kind), label.clone()),
+    };
+    let content = gtk::Box::builder()
+        .spacing(12)
+        .margin_top(9)
+        .margin_bottom(9)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    content.append(&gtk::Image::from_icon_name(icon));
+    content.append(
+        &gtk::Label::builder()
+            .label(&label)
+            .xalign(0.0)
+            .hexpand(true)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build(),
+    );
+    gtk::ListBoxRow::builder()
+        .child(&content)
+        .activatable(true)
+        .build()
+}
+
 impl DeviceSelectorWidget {
-    fn action(&self, name: &str) -> Option<Action> {
-        self.imp().action_group.lookup_action(name)
-    }
-
-    pub fn connect_refresh<F>(&self, f: F)
-    where
-        F: Fn() + 'static,
-    {
-        self.imp().action_group.add_action(&{
-            let refresh = SimpleAction::new(REFRESH_ACTION, None);
-            refresh.connect_activate(move |_, _| f());
-            refresh
-        });
-    }
-
     pub fn connect_switch_device<F>(&self, f: F)
     where
         F: Fn(Option<String>) + 'static,
     {
-        self.imp().action_group.add_action(&{
-            let connect = SimpleAction::new_stateful(
-                CONNECT_ACTION,
-                Some(Option::<String>::static_variant_type().as_ref()),
-                &Option::<String>::None.to_variant(),
-            );
-            connect.connect_activate(move |action, device_id| {
-                if let Some(device_id) = device_id {
-                    action.change_state(device_id);
-                    f(Option::<String>::from_variant(device_id).unwrap());
+        self.imp().devices_list.connect_row_activated(clone!(
+            #[weak(rename_to = this)]
+            self,
+            move |_, row| {
+                let target = this
+                    .imp()
+                    .row_targets
+                    .borrow()
+                    .get(row.index() as usize)
+                    .cloned();
+                if let Some(target) = target {
+                    this.imp().popover.popdown();
+                    f(target);
                 }
-            });
-            connect
-        });
+            }
+        ));
     }
 
-    pub fn set_current_device(&self, device: &Device) {
-        if let Some(action) = self.action(CONNECT_ACTION) {
-            let device_id = match device {
-                Device::Local => None,
-                Device::Connect(connect) => Some(&connect.id),
-            };
-            action.change_state(&device_id.to_variant());
-        }
-        let label = match device {
-            Device::Local => gettext("This Device"),
-            Device::Connect(connect) => connect.label.clone(),
-        };
-        let icon = match device {
-            Device::Local => "audio-x-generic-symbolic",
-            Device::Connect(connect) => match connect.kind {
-                DeviceKind::Phone => "phone-symbolic",
-                DeviceKind::Computer => "computer-symbolic",
-                DeviceKind::Speaker => "audio-speakers-symbolic",
-                DeviceKind::Tv => "tv-symbolic",
-                DeviceKind::Other => "audio-x-generic-symbolic",
-            },
-        };
-        self.imp().button_content.set_label(&label);
-        self.imp().button_content.set_icon_name(icon);
+    pub fn connect_volume_changed<F>(&self, f: F)
+    where
+        F: Fn(f64) + 'static,
+    {
+        let f = Rc::new(f);
+        self.imp().volume_scale.connect_value_changed(clone!(
+            #[weak(rename_to = this)]
+            self,
+            move |scale| {
+                let widget = this.imp();
+                if widget.syncing_volume.get() {
+                    return;
+                }
+                if let Some(pending) = widget.pending_volume.take() {
+                    pending.remove();
+                }
+                let volume = scale.value() / 100.0;
+                let f = f.clone();
+                let source = glib::timeout_add_local_once(
+                    VOLUME_DEBOUNCE,
+                    clone!(
+                        #[weak]
+                        this,
+                        move || {
+                            this.imp().pending_volume.take();
+                            f(volume);
+                        }
+                    ),
+                );
+                widget.pending_volume.replace(Some(source));
+            }
+        ));
     }
 
-    pub fn update_devices_list(&self, devices: &[ConnectDevice]) {
+    pub fn update(&self, list: &DeviceList) {
         let widget = self.imp();
-        widget.this_device_button.set_sensitive(!devices.is_empty());
+        widget.spinner.set_visible(!list.online);
+        widget.spinner.set_spinning(!list.online);
 
-        while let Some(child) = widget.devices.upcast_ref::<gtk::Widget>().first_child() {
-            widget.devices.remove(&child);
+        let (icon, name, subtitle) = match &list.current {
+            DeviceEntry::ThisDevice => ("computer-symbolic", gettext("This Device"), None),
+            DeviceEntry::Other(device) => (
+                icon_for(device.kind),
+                device.label.clone(),
+                Some(kind_label(device.kind)),
+            ),
+        };
+        widget.current_icon.set_icon_name(Some(icon));
+        widget.current_name.set_label(&name);
+        widget.current_subtitle.set_visible(subtitle.is_some());
+        widget
+            .current_subtitle
+            .set_label(subtitle.as_deref().unwrap_or_default());
+
+        self.set_icon_name(icon);
+        if subtitle.is_some() {
+            self.add_css_class("accent");
+            // translators: Tooltip of the device button while another device plays. {} is its name.
+            let tooltip = labels::fill(gettext("Playing on {}"), &[&name]);
+            self.set_tooltip_text(Some(&tooltip));
+        } else {
+            self.remove_css_class("accent");
+            self.set_tooltip_text(Some(&gettext("Connect to a Device")));
         }
 
-        for device in devices {
-            let check = gtk::CheckButton::builder()
-                .action_name(format!("{}.{}", ACTIONS, CONNECT_ACTION))
-                .action_target(&Some(&device.id).to_variant())
-                .group(&*widget.this_device_button)
-                .label(&device.label)
-                .build();
-            widget.devices.append(&check);
+        let volume = list.current_volume();
+        widget.volume_box.set_visible(volume.is_some());
+        if let Some(volume) = volume {
+            if widget.pending_volume.borrow().is_none() {
+                widget.syncing_volume.set(true);
+                widget.volume_scale.set_value(volume as f64);
+                widget.syncing_volume.set(false);
+            }
         }
+
+        widget.devices_list.remove_all();
+        let mut targets = Vec::with_capacity(list.others.len());
+        for entry in &list.others {
+            widget.devices_list.append(&device_row(entry));
+            targets.push(match entry {
+                DeviceEntry::ThisDevice => None,
+                DeviceEntry::Other(device) => Some(device.id.clone()),
+            });
+        }
+        widget.row_targets.replace(targets);
+        let empty = list.others.is_empty();
+        widget.devices_list.set_visible(!empty);
+        widget.empty_label.set_visible(empty);
     }
 }

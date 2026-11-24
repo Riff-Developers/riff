@@ -9,12 +9,10 @@ use super::card_grid::CardGrid;
 use crate::app::components::details_page::is_playback_event;
 use crate::app::components::{CardLayout, CardSize, CardWidget, ImageShape, SortOrder};
 use crate::app::models::{CardModel, FilterOption};
-use crate::app::state::{EntryKey, PlaybackEvent, PlaybackState};
+use crate::app::state::{PlaybackFields, PlaybackState};
 use crate::app::{AppEvent, ListStore, ProvidesApi, SongsSource};
 use riff_api::ApiService;
 use std::sync::Arc;
-
-// Constants
 
 const MIN_CHILDREN_PER_LINE: u32 = 1;
 const MAX_CHILDREN_PER_LINE: u32 = 24;
@@ -22,34 +20,25 @@ const ROW_SPACING: u32 = 6;
 const COLUMN_SPACING: u32 = 6;
 const PLACEHOLDER_COUNT: u32 = 50;
 
-/// Gap between image and labels in horizontal card layout (matches CardWidget).
 const HORIZONTAL_GAP: i32 = 12;
 
-/// Label width multiplier for horizontal card layout (matches CardWidget).
 const HORIZONTAL_LABEL_WIDTH_SCALE: f32 = 1.8;
 
-/// Key used to attach a CardModel to a FlowBoxChild via GObject unsafe data.
 const MODEL_DATA_KEY: &str = "card-model";
 
 pub type PlayingCard = Option<(String, bool)>;
 
 pub fn playing_card(playback: &PlaybackState) -> PlayingCard {
-    let queued = matches!(playback.current_key(), Some(EntryKey::Queued(_)));
     let id = match playback.current_source() {
-        Some(SongsSource::Album(id) | SongsSource::Playlist(id) | SongsSource::Artist(id))
-            if !queued =>
-        {
-            id.clone()
-        }
-        Some(_) if !queued => return None,
-        _ => playback.current_song()?.album?.rri.id,
+        Some(SongsSource::Album(id) | SongsSource::Playlist(id) | SongsSource::Artist(id)) => id,
+        Some(_) => return None,
+        None => playback.current_song()?.album?.rri.id,
     };
     Some((id, playback.is_playing()))
 }
 
 pub fn changes_playing_card(event: &AppEvent) -> bool {
-    is_playback_event(event).is_some()
-        || matches!(event, AppEvent::PlaybackEvent(PlaybackEvent::SourceChanged))
+    is_playback_event(event).is_some() || event.playback_changed(PlaybackFields::CONTEXT)
 }
 
 fn playing_state(card_id: &str, playing: &PlayingCard) -> Option<bool> {
@@ -59,7 +48,6 @@ fn playing_state(card_id: &str, playing: &PlayingCard) -> Option<bool> {
         .map(|(_, is_playing)| *is_playing)
 }
 
-/// Trait that abstracts the data/API layer for a card list.
 pub trait CardListModel {
     fn get_store(&self) -> Option<impl Deref<Target = ListStore<CardModel>> + '_>;
     fn load_more(&self);
@@ -109,10 +97,6 @@ impl CardFilter {
     }
 }
 
-/// An embeddable FlowBox-based card grid.
-///
-/// Manually manages FlowBox children and uses `set_sort_func` + `invalidate_sort`
-/// for flash-free reordering (no widget destruction/recreation on sort changes).
 pub struct CardList {
     grid: CardGrid,
     flowbox: gtk::FlowBox,
@@ -122,17 +106,10 @@ pub struct CardList {
     current_filter: Rc<RefCell<CardFilter>>,
     playing: Rc<RefCell<PlayingCard>>,
     next_position: Rc<Cell<i64>>,
-    /// Lowest insertion position assigned so far. Freshly added (prepended)
-    /// items are given positions below this so they rank as the most recently
-    /// added under the "Recently Added" sort.
     min_position: Rc<Cell<i64>>,
-    /// Maximum number of rows to display. None means unlimited.
     max_rows: Rc<Cell<Option<u32>>>,
-    /// Number of placeholder children currently in the FlowBox.
     placeholder_count: Rc<Cell<u32>>,
-    /// Signal connection to the source store, disconnected on drop.
     source_signal: Cell<Option<(gio::ListStore, glib::SignalHandlerId)>>,
-    /// Signal connection for child activation, disconnected on rebind/drop.
     activation_signal: Cell<Option<glib::SignalHandlerId>>,
 }
 
@@ -153,14 +130,6 @@ impl CardList {
         let current_layout = Rc::new(Cell::new(CardLayout::Vertical));
         let current_filter = Rc::new(RefCell::new(CardFilter::All));
 
-        // Re-apply the row limit every frame using the FlowBox's actual
-        // laid-out geometry. GTK4 FlowBox doesn't emit a resize signal, and the
-        // real column count (after theme padding, spacing rounding, and
-        // hexpand distribution) can differ from a pixel-math estimate. Reading
-        // the children's allocated positions each frame keeps the row limit
-        // correct across resizes, card size/layout changes, and content loads.
-        // `set_visible` is a no-op when the value is unchanged, so a steady
-        // state does not trigger relayouts.
         let max_rows_for_tick = Rc::clone(&max_rows);
         let current_size_for_tick = Rc::clone(&current_size);
         let current_layout_for_tick = Rc::clone(&current_layout);
@@ -209,7 +178,6 @@ impl CardList {
         layout: CardLayout,
         size: CardSize,
     ) {
-        // Clean up any previous bind
         if let Some((store, id)) = self.source_signal.take() {
             store.disconnect(id);
         }
@@ -229,21 +197,17 @@ impl CardList {
             let api_service = model.api_service();
             let inner = store.inner().clone();
 
-            // Install sort function
             let sort_ref = Rc::clone(&self.current_sort);
             self.flowbox
                 .set_sort_func(move |a, b| sort_children(sort_ref.get(), a, b).into());
 
-            // Install filter function
             let filter_ref = Rc::clone(&self.current_filter);
-            self.flowbox.set_filter_func(move |child| {
-                match get_model(child) {
+            self.flowbox
+                .set_filter_func(move |child| match get_model(child) {
                     Some(card) => filter_ref.borrow().matches(&card),
-                    None => true, // Show placeholders
-                }
-            });
+                    None => true,
+                });
 
-            // Add existing items
             let mut counter = self.next_position.get().max(1);
             for i in 0..inner.n_items() {
                 if let Some(obj) = inner.item(i) {
@@ -256,7 +220,6 @@ impl CardList {
             }
             self.next_position.set(counter);
 
-            // React to source store changes
             let flowbox_weak = self.flowbox.downgrade();
             let next_pos = Rc::clone(&self.next_position);
             let min_pos = Rc::clone(&self.min_position);
@@ -275,12 +238,10 @@ impl CardList {
                     let layout = current_layout.get();
                     let size = current_size.get();
 
-                    // Remove placeholders when real data arrives
                     if added > 0 && placeholder_count.get() > 0 {
                         remove_placeholder_children(&flowbox, &placeholder_count);
                     }
 
-                    // Handle removals: find children that no longer exist in the source store.
                     if removed > 0 {
                         let source_cards: std::collections::HashSet<glib::Object> = (0..source
                             .n_items())
@@ -302,14 +263,7 @@ impl CardList {
                         }
                     }
 
-                    // Add new items
                     if added > 0 {
-                        // A single/bulk insert at the front of a non-empty store
-                        // (a save/follow/create) is the most recently added
-                        // content. Give those cards positions below the current
-                        // minimum so they sort to the top under "Recently Added";
-                        // the FlowBox sort function orders them by their card
-                        // properties for every other sort order on insert.
                         let before = source.n_items().saturating_sub(added);
                         let is_prepend = position == 0 && removed == 0 && before > 0;
 
@@ -319,9 +273,6 @@ impl CardList {
                                 let i = position + offset;
                                 if let Some(obj) = source.item(i) {
                                     if let Some(card) = obj.downcast_ref::<CardModel>() {
-                                        // Item nearest the top of the store
-                                        // (offset 0) is the most recent, so it
-                                        // gets the smallest position.
                                         let pos = min - (added as i64 - offset as i64);
                                         card.set_insertion_position(pos);
                                         let child = create_child(
@@ -362,7 +313,6 @@ impl CardList {
                         }
                     }
 
-                    // Re-apply the row limit after any change
                     if let Some(rows) = constraint.get() {
                         apply_grid_constraint(
                             &flowbox,
@@ -375,7 +325,6 @@ impl CardList {
                 });
             self.source_signal.set(Some((inner, handler_id)));
 
-            // Handle activation (clicks)
             let weak_model = Rc::downgrade(model);
             let activation_id = self.flowbox.connect_child_activated(move |_, child| {
                 if let Some(card_widget) =
@@ -440,7 +389,7 @@ impl CardList {
 
     pub fn set_playing(&self, playing: PlayingCard) {
         if *self.playing.borrow() == playing {
-            return; // e.g. the next track of the same album
+            return;
         }
         self.for_each_card(|card| card.set_playing(playing_state(&card.card_id(), &playing)));
         *self.playing.borrow_mut() = playing;
@@ -465,11 +414,8 @@ impl CardList {
 
     pub fn set_card_filter(&self, filter: CardFilter) {
         if filter == CardFilter::All {
-            // Showing all - remove height constraint
             self.flowbox.set_height_request(-1);
         } else {
-            // Lock the current height before filtering so it doesn't shrink,
-            // but cap at the viewport height to avoid extending past the visible area.
             let current_height = self.flowbox.height();
             if current_height > 0 {
                 let viewport_height = self
@@ -528,7 +474,6 @@ impl CardList {
     /// If no limit is active, all children are made visible.
     pub fn apply_constraint(&self) {
         let Some(rows) = self.max_rows.get() else {
-            // No limit - make all children visible
             let mut child = self.flowbox.first_child();
             while let Some(c) = child {
                 if let Some(fb_child) = c.downcast_ref::<gtk::FlowBoxChild>() {
@@ -626,7 +571,6 @@ fn create_child(
     child.set_halign(gtk::Align::Fill);
     child.set_hexpand(true);
     child.set_child(Some(&widget));
-    // Attach the CardModel so the sort function can access it.
     // SAFETY: MODEL_DATA_KEY is unique to this module and always stores a CardModel.
     // The data outlives the child because GObject prevents use-after-free on qdata.
     unsafe {
@@ -644,7 +588,6 @@ fn create_child_placeholder(layout: CardLayout, size: CardSize) -> gtk::FlowBoxC
     child.set_halign(gtk::Align::Fill);
     child.set_hexpand(true);
     child.set_child(Some(&widget));
-    // No model attached - get_model() returning None identifies this as a placeholder.
     child
 }
 
@@ -704,8 +647,6 @@ fn compare_cards(sort: SortOrder, a: &CardModel, b: &CardModel) -> Ordering {
     }
 }
 
-/// Padding applied to each card container via CSS (`.container { padding: 6px }`).
-/// Both left and right padding contribute to the effective width.
 const CARD_CONTAINER_PADDING: i32 = 6;
 
 /// Determine the number of columns in the first (top) row from the FlowBox's
@@ -725,16 +666,12 @@ fn measured_columns(flowbox: &gtk::FlowBox) -> Option<u32> {
         return None;
     }
 
-    // The Y position of each child relative to the FlowBox. Children in the top
-    // row share the smallest Y. `compute_bounds` returns positions in the
-    // target's coordinate space (here, the FlowBox itself).
     let child_top = |fb_child: &gtk::FlowBoxChild| -> Option<i32> {
         fb_child
             .compute_bounds(flowbox)
             .map(|bounds| bounds.y().round() as i32)
     };
 
-    // Find the minimum Y among visible children (the top row).
     let mut min_y = i32::MAX;
     let mut child = flowbox.first_child();
     while let Some(c) = child {
@@ -754,7 +691,6 @@ fn measured_columns(flowbox: &gtk::FlowBox) -> Option<u32> {
         return None;
     }
 
-    // Count visible children sitting on the top row.
     let mut count = 0u32;
     let mut child = flowbox.first_child();
     while let Some(c) = child {
@@ -833,7 +769,6 @@ fn apply_grid_constraint(
                     }
                 }
                 None => {
-                    // Placeholder - count it toward the limit too
                     fb_child.set_visible(visible_index < max_visible);
                     visible_index += 1;
                 }

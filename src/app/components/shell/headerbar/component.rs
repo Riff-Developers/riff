@@ -6,13 +6,14 @@ use glib::clone;
 
 use crate::app::components::navigation_panel::NavigationPanelDestination;
 use crate::app::components::{labels, EventListener};
-use crate::app::state::{Entry, HomePage, Route, SelectionAction, SelectionEvent};
-use crate::app::{AppAction, AppEvent, AppModel, BrowserAction, BrowserEvent, Dispatcher};
+use crate::app::state::Action;
+use crate::app::state::Event;
+use crate::app::state::NavigationAction;
+use crate::app::state::{Entry, HomePage, NavigationFields, Route, SelectionAction};
+use crate::app::{AppAction, AppEvent, AppModel, Dispatcher};
 
 use super::widget::{AppHeaderBar, HistoryMenuItem, HistorySide};
 
-/// Selection behavior the shared header needs from the active screen.
-/// Back and title are handled by the header itself.
 pub trait HeaderBarModel {
     fn select_all(&self);
     fn selectable_keys(&self) -> Vec<String>;
@@ -21,8 +22,6 @@ pub trait HeaderBarModel {
     fn selects_queue(&self) -> bool;
 }
 
-/// Per-screen selection hooks, wrapped into a [`HeaderBarModel`] by
-/// [`SimpleHeaderBarModelWrapper`].
 pub trait SimpleHeaderBarModel {
     fn select_all(&self);
     fn selectable_keys(&self) -> Vec<String> {
@@ -65,7 +64,8 @@ where
     }
 
     fn cancel_selection(&self) {
-        self.dispatcher.dispatch(AppAction::CancelSelection)
+        self.dispatcher
+            .dispatch(AppAction::Core(Action::CancelSelection))
     }
 
     fn selects_queue(&self) -> bool {
@@ -82,12 +82,8 @@ fn all_selected(model: &dyn HeaderBarModel, app_model: &AppModel) -> bool {
     !keys.is_empty() && keys.iter().all(|key| state.selection.is_song_selected(key))
 }
 
-/// Maps a header page name (see [`resolve_active_page`]) to the
-/// [`HeaderBarModel`] for that screen. Screens populate it as they are built;
-/// [`AppHeaderBarComponent`] reads it to rebind the header on screen changes.
 pub type HeaderModelRegistry = Rc<RefCell<HashMap<String, Rc<dyn HeaderBarModel>>>>;
 
-/// Most entries listed in a history menu.
 const HISTORY_MENU_LENGTH: usize = 10;
 
 fn resolve_active_page(route: &Route) -> String {
@@ -122,8 +118,6 @@ fn route_icon(route: &Route) -> &'static str {
     }
 }
 
-/// Owns the app-wide header bar, swapping its title/button pages and
-/// selection/back behavior when the active screen changes.
 pub struct AppHeaderBarComponent {
     widget: AppHeaderBar,
     app_model: Rc<AppModel>,
@@ -143,12 +137,12 @@ impl AppHeaderBarComponent {
         widget.connect_go_back(clone!(
             #[strong]
             dispatcher,
-            move || dispatcher.dispatch(BrowserAction::NavigationBack.into())
+            move || dispatcher.dispatch(NavigationAction::Back.into())
         ));
         widget.connect_go_forward(clone!(
             #[strong]
             dispatcher,
-            move || dispatcher.dispatch(BrowserAction::NavigationForward.into())
+            move || dispatcher.dispatch(NavigationAction::Forward.into())
         ));
 
         widget.connect_history_menu(clone!(
@@ -170,10 +164,9 @@ impl AppHeaderBarComponent {
         widget.connect_history_pick(clone!(
             #[strong]
             dispatcher,
-            move |id| dispatcher.dispatch(BrowserAction::NavigationGoTo(id).into())
+            move |id| dispatcher.dispatch(NavigationAction::GoTo(id).into())
         ));
 
-        // Selection controls route to the active screen.
         widget.connect_select_all(clone!(
             #[strong]
             active_model,
@@ -218,9 +211,10 @@ impl AppHeaderBarComponent {
         *self.active_model.borrow_mut() = model;
 
         let state = self.app_model.get_state();
-        self.widget.set_can_go_back(state.browser.can_go_back());
         self.widget
-            .set_can_go_forward(state.browser.can_go_forward());
+            .set_can_go_back(state.browser.navigator().can_go_back());
+        self.widget
+            .set_can_go_forward(state.browser.navigator().can_go_forward());
         drop(state);
         self.refresh_selection();
     }
@@ -270,15 +264,15 @@ impl EventListener for AppHeaderBarComponent {
     fn on_event(&mut self, event: &AppEvent) {
         match event {
             AppEvent::Started => self.refresh_active(),
-            AppEvent::BrowserEvent(
-                BrowserEvent::NavigationChanged(_) | BrowserEvent::NavigationHidden(_),
-            ) => {
+            AppEvent::Core(Event::Selection(_)) => self.refresh_selection(),
+            _ if event.navigation().is_some_and(|n| {
+                n.changed
+                    .intersects(NavigationFields::ROUTE | NavigationFields::HIDDEN)
+            }) =>
+            {
                 self.cancel_active_selection();
                 self.refresh_active();
             }
-            AppEvent::SelectionEvent(
-                SelectionEvent::SelectionModeChanged(_) | SelectionEvent::SelectionChanged,
-            ) => self.refresh_selection(),
             _ => {}
         }
     }

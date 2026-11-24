@@ -1,0 +1,20 @@
+[package]
+name = "riff-mpris"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Riff's MPRIS server: lets the desktop show and control playback over D-Bus."
+
+[dependencies]
+riff-api = { path = "../riff-api" }
+riff-core = { path = "../riff-core" }
+futures = "0.3.18"
+log = "0.4.17"
+zbus = { version = "5.12", default-features = false, features = ["tokio"] }
+
+[dependencies.tokio]
+version = "1"
+features = ["rt", "rt-multi-thread", "macros"]
+
+[lints]
+workspace = true

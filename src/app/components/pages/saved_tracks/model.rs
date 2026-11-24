@@ -1,28 +1,24 @@
-// Model for the saved tracks (liked songs) page.
-// Implements PageModel, TrackListModel, and SimpleHeaderBarModel to drive
-// track listing, pagination, playback, and selection.
-
 use gettextrs::{gettext, ngettext};
 use std::ops::Deref;
 use std::rc::Rc;
 
 use crate::{impl_source_page, impl_source_track_list, impl_track_list_model_base};
 
-use crate::app::components::{
-    dispatch_api_read, HasHeaderBarModel, HeaderImageShape, PageModel, PinnedPageModel,
-    TrackListModel,
-};
 use crate::app::components::{labels, DetailsPageModel};
-use crate::app::models::*;
-use crate::app::state::SelectionContext;
-use crate::app::state::SelectionState;
-use crate::app::{
-    AppEvent, AppModel, BrowserAction, BrowserEvent, Dispatcher, PaginationTarget, SongsSource,
+use crate::app::components::{
+    HasHeaderBarModel, HeaderImageShape, PageModel, PinnedPageModel, ScreenModel, TrackListModel,
 };
+use crate::app::models::*;
+use crate::app::state::{HomePage, PageFields, Route, SelectionContext, SelectionState};
+use crate::app::{AppEvent, AppModel, Dispatcher, SongsSource};
+use riff_core::screens::SavedTracksScreen;
 
-/// Data model for the saved tracks page. Composes `DetailsPageModel` via Deref.
+const TRACKS_PAGE: usize = 50;
+
 pub struct SavedTracksModel {
     base: DetailsPageModel,
+    screen: ScreenModel<SavedTracksScreen>,
+    songs: SongListModel,
 }
 
 impl Deref for SavedTracksModel {
@@ -38,19 +34,29 @@ impl PinnedPageModel for SavedTracksModel {}
 
 impl SavedTracksModel {
     pub fn new(app_model: Rc<AppModel>, dispatcher: Dispatcher) -> Self {
+        let base = DetailsPageModel::new_without_id(Rc::clone(&app_model), dispatcher.clone());
+        let songs = SongListModel::new(TRACKS_PAGE as u32);
+        let rows = songs.clone();
+        let screen = ScreenModel::new(
+            SavedTracksScreen::new(base.liked.clone()),
+            &app_model,
+            dispatcher,
+            move |screen, changed| {
+                if changed.contains(PageFields::TRACKS) {
+                    rows.clone().sync_pages(&screen.tracks);
+                }
+            },
+        );
         Self {
-            base: DetailsPageModel::new_without_id(app_model, dispatcher),
+            base,
+            screen,
+            songs,
         }
     }
 
     /// Called on login to load the initial batch of saved tracks.
     pub fn load_initial(&self) {
-        let api = self.app_model.api();
-        dispatch_api_read(&self.dispatcher, move |tag| async move {
-            api.get_saved_tracks(0, 50, tag)
-                .await
-                .map(|song_batch| BrowserAction::SetSavedTracks(Box::new(song_batch)).into())
-        });
+        self.screen.open();
     }
 }
 
@@ -60,14 +66,7 @@ impl PageModel for SavedTracksModel {
     }
 
     fn get_subtitle(&self) -> Option<String> {
-        let loaded = TrackListModel::song_list_model(self).len();
-        let count = self
-            .app_model
-            .get_state()
-            .browser
-            .home_state()
-            .and_then(|s| s.saved_tracks_total)
-            .map_or(loaded, |total| total.max(loaded));
+        let count = self.screen.get().count();
         let text = ngettext("{} Track", "{} Tracks", count as u32);
         Some(labels::fill(text, &[&count.to_string()]))
     }
@@ -89,30 +88,11 @@ impl PageModel for SavedTracksModel {
     }
 
     fn load_more(&self) {
-        let api = self.app_model.api();
-        let state = self.app_model.get_state();
-        let Some(next_page) = state
-            .browser
-            .home_state()
-            .map(|s| s.next_saved_tracks_page.clone())
-        else {
-            return;
-        };
-        drop(state);
+        self.screen.load_more();
+    }
 
-        let Some(offset) = next_page.next_offset else {
-            return;
-        };
-        let batch_size = next_page.batch_size;
-
-        self.app_model
-            .update_state(BrowserAction::ConsumeNextPage(PaginationTarget::SavedTracks).into());
-
-        dispatch_api_read(&self.dispatcher, move |tag| async move {
-            api.get_saved_tracks(offset, batch_size, tag)
-                .await
-                .map(|song_batch| BrowserAction::AppendSavedTracks(Box::new(song_batch)).into())
-        });
+    fn apply_event(&self, event: &AppEvent) {
+        self.screen.apply(event);
     }
 
     fn is_loaded(&self) -> bool {
@@ -122,22 +102,15 @@ impl PageModel for SavedTracksModel {
     impl_source_page!();
 
     fn should_refresh_details(&self, event: &AppEvent) -> bool {
-        matches!(
-            event,
-            AppEvent::BrowserEvent(BrowserEvent::SavedTracksUpdated)
-        )
+        event
+            .page_loaded(&Route::Home(HomePage::SavedTracks))
+            .is_some()
     }
 }
 
 impl TrackListModel for SavedTracksModel {
     fn song_list_model(&self) -> SongListModel {
-        self.app_model
-            .get_state()
-            .browser
-            .home_state()
-            .expect("illegal attempt to read home_state")
-            .saved_tracks
-            .clone()
+        self.songs.clone()
     }
 
     fn autoscroll_to_playing(&self) -> bool {

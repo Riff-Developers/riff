@@ -50,7 +50,7 @@ impl TokenStore {
         }))
     }
 
-    async fn keyring() -> Result<Keyring> {
+    pub(crate) async fn keyring() -> Result<Keyring> {
         let mut total_delay = Duration::ZERO;
         let mut last_err = None;
         for attempt in 0..MAX_KEYRING_RETRIES {

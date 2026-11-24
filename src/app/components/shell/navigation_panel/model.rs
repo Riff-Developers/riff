@@ -10,27 +10,13 @@ use crate::app::components::{
     dispatch_api_call, dispatch_api_call_many, dispatch_api_read, dispatch_api_read_many,
     queue_source_tracks, upload_playlist_cover, PlaylistForm, Saved,
 };
-use crate::app::models::{CardModel, PlaylistSummary};
-use crate::app::playlist_actions::unfollow_and_unpin_playlist;
-use crate::app::state::{load_context, start_actions, PlaybackAction, Route};
-use crate::app::{AppAction, AppModel, BrowserAction, Dispatcher, PaginationTarget, SongsSource};
-use crate::settings;
-use riff_config::feature_flags::{is_enabled, FeatureFlag};
-use riff_core::play_queue::CONTEXT_PAGE_SIZE;
-
-// Nothing for an empty context
-fn start_context(
-    empty: bool,
-    source: SongsSource,
-    name: Option<String>,
-    load: PlaybackAction,
-    shuffle: bool,
-) -> Vec<AppAction> {
-    if empty {
-        return vec![];
-    }
-    start_actions(shuffle, load_context(source, name, load))
-}
+use crate::app::models::{Playlist, PlaylistSummary};
+use crate::app::state::PinKind;
+use crate::app::state::{playback_actions, PlayContext, Route};
+use crate::app::state::{ItemId, LibraryAction, NavigationAction, Pin};
+use crate::app::{AppAction, AppModel, Dispatcher, SongsSource};
+use riff_config::feature_flag::{is_enabled, FeatureFlag};
+use riff_core::library;
 
 pub struct NavigationPanelModel {
     app_model: Rc<AppModel>,
@@ -52,59 +38,35 @@ impl NavigationPanelModel {
     fn get_playlists(&self) -> Vec<NavigationPanelDestination> {
         self.app_model
             .get_state()
-            .browser
-            .home_state()
-            .expect("expected HomeState to be available")
-            .playlists
+            .library
+            .playlists()
             .iter()
             .map(Self::map_to_destination)
             .collect()
     }
 
-    pub fn load_more_playlists(&self) -> Option<()> {
-        let api = self.app_model.api();
-        let state = self.app_model.get_state();
-        let home = state.browser.home_state()?;
-        let batch_size = home.next_playlists_page.batch_size;
-        let offset = home.next_playlists_page.next_offset?;
-        drop(state);
-
-        self.app_model
-            .update_state(BrowserAction::ConsumeNextPage(PaginationTarget::SavedPlaylists).into());
-
-        dispatch_api_read(&self.dispatcher, move |tag| async move {
-            api.get_saved_playlists(offset, batch_size, tag)
-                .await
-                .map(|page| BrowserAction::AppendPlaylistsContent(page.items).into())
-        });
-
-        Some(())
-    }
-
-    fn map_to_destination(a: CardModel) -> NavigationPanelDestination {
-        let title = Some(a.title())
+    fn map_to_destination(playlist: &Playlist) -> NavigationPanelDestination {
+        let title = Some(playlist.title.clone())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| gettext("Unnamed Playlist"));
-        let id = a.id();
+        let id = playlist.rri.id.clone();
         NavigationPanelDestination::Playlist(PlaylistSummary { id, title })
     }
 
     pub(super) fn create_new_playlist(&self, new: PlaylistForm) -> oneshot::Receiver<()> {
         let (created, created_rx) = Saved::channel();
-        let user_id = self.app_model.get_state().logged_user.user.clone().unwrap();
+        let user_id = self.app_model.get_state().session.user.clone().unwrap();
         let api = self.app_model.api();
         let dispatcher = self.dispatcher.clone();
         dispatch_api_call_many(&self.dispatcher, move || async move {
-            let playlist = api
-                .create_playlist(&user_id, &new.name, new.description.as_deref(), new.public)
-                .await?;
+            let playlist = library::create_playlist(&api, &user_id, &new.new_details()).await?;
             created.tell();
             let id = playlist.rri.id.clone();
             if let Some(cover) = new.cover {
                 upload_playlist_cover(&dispatcher, api, id.clone(), cover);
             }
             Ok(vec![
-                AppAction::CreatePlaylist(playlist),
+                AppAction::Core(LibraryAction::SavePlaylist(Box::new(playlist)).into()),
                 AppAction::ViewPlaylist(id),
             ])
         });
@@ -112,22 +74,19 @@ impl NavigationPanelModel {
     }
 
     pub(super) fn is_playlist_owned(&self, id: &str) -> bool {
-        self.app_model
-            .get_state()
-            .logged_user
-            .owned_playlist_ids
-            .contains(id)
-    }
-
-    pub(super) fn logged_user_id(&self) -> Option<String> {
-        self.app_model.get_state().logged_user.user.clone()
+        let state = self.app_model.get_state();
+        let Some(user) = state.session.user.as_deref() else {
+            return false;
+        };
+        state.library.is_playlist_owned_by(id, user)
     }
 
     pub(super) fn unfollow_playlist(&self, id: String) {
-        let user_id = self.logged_user_id();
         let api = self.app_model.api();
         dispatch_api_call(&self.dispatcher, move || async move {
-            unfollow_and_unpin_playlist(&api, id, user_id).await
+            Ok(library::set_saved(&api, ItemId::Playlist(id), false)
+                .await?
+                .into())
         })
     }
 
@@ -151,17 +110,24 @@ impl NavigationPanelModel {
     }
 
     fn start_playlist(&self, id: String, shuffle: bool) {
-        let api = self.app_model.api();
-        let source = SongsSource::Playlist(id.clone());
         let name = self.playlist_title(&id);
-        dispatch_api_read_many(&self.dispatcher, move |tag| async move {
-            let batch = api
-                .get_playlist_tracks(&id, 0, CONTEXT_PAGE_SIZE, tag)
-                .await?;
-            let empty = batch.items.is_empty();
-            let load = PlaybackAction::LoadPagedSongs(source.clone(), batch);
-            Ok(start_context(empty, source, name, load, shuffle))
-        });
+        self.start(SongsSource::Playlist(id), name, shuffle);
+    }
+
+    fn start(&self, source: SongsSource, name: Option<String>, shuffle: bool) {
+        let context = PlayContext::whole(source, name);
+        self.dispatcher
+            .dispatch_many(playback_actions(context.play(None, Some(shuffle))));
+    }
+
+    fn title_pinned_with(&self, kind: PinKind, id: &str) -> Option<String> {
+        let state = self.app_model.get_state();
+        let pin = state
+            .library
+            .pins()
+            .iter()
+            .find(|pin| pin.kind == kind && pin.id == id)?;
+        state.library.pin_title(pin)
     }
 
     pub(super) fn queue_playlist(&self, id: String) {
@@ -171,81 +137,36 @@ impl NavigationPanelModel {
 
     /// Play a pinned album from its first track, or shuffled.
     pub(super) fn play_album(&self, id: String, shuffle: bool) {
-        let api = self.app_model.api();
-        let source = SongsSource::Album(id.clone());
-        dispatch_api_read_many(&self.dispatcher, move |tag| async move {
-            let batch = api.get_album_tracks(&id, 0, CONTEXT_PAGE_SIZE, tag).await?;
-            let empty = batch.items.is_empty();
-            let name = batch
-                .items
-                .iter()
-                .find_map(|t| Some(t.album.as_ref()?.name.clone()));
-            let load = PlaybackAction::LoadPagedSongs(source.clone(), batch);
-            Ok(start_context(empty, source, name, load, shuffle))
-        });
+        let name = self.title_pinned_with(PinKind::Album, &id);
+        self.start(SongsSource::Album(id), name, shuffle);
     }
 
     /// Play a pinned artist's top tracks, or shuffle them.
     pub(super) fn play_artist(&self, id: String, shuffle: bool) {
-        let api = self.app_model.api();
-        let source = SongsSource::Artist(id.clone());
-        dispatch_api_read_many(&self.dispatcher, move |tag| async move {
-            let tracks = api.get_artist_top_tracks(&id, tag).await?;
-            let empty = tracks.is_empty();
-            let name = tracks
-                .iter()
-                .flat_map(|t| t.artists.iter())
-                .find(|a| a.rri.id == id)
-                .map(|a| a.name.clone());
-            let load = PlaybackAction::LoadContextSongs(source.clone(), tracks);
-            Ok(start_context(empty, source, name, load, shuffle))
-        });
+        let name = self.title_pinned_with(PinKind::Artist, &id);
+        self.start(SongsSource::Artist(id), name, shuffle);
     }
 
-    /// Whether a pinned album, artist or track is known to be in the user's
-    /// library. Only the loaded pages of the library are checked.
-    pub(super) fn is_in_library(&self, kind: settings::PinnedKind, id: &str) -> bool {
-        let state = self.app_model.get_state();
-        let Some(home) = state.browser.home_state() else {
-            return false;
+    /// Whether a pinned item is in the user's library. Removing an album,
+    /// artist or track unpins it, so pinned ones are saved.
+    pub(super) fn is_in_library(&self, kind: PinKind, id: &str) -> bool {
+        kind != PinKind::Playlist || self.app_model.get_state().library.has_playlist(id)
+    }
+
+    pub(super) fn is_pinned(&self, kind: PinKind, id: &str) -> bool {
+        self.app_model.get_state().library.is_pinned(kind, id)
+    }
+
+    pub(super) fn remove_from_library(&self, kind: PinKind, id: String) {
+        let item = match kind {
+            PinKind::Playlist => ItemId::Playlist(id),
+            PinKind::Album => ItemId::Album(id),
+            PinKind::Artist => ItemId::Artist(id),
+            PinKind::Track => ItemId::Tracks(vec![id]),
         };
-        match kind {
-            settings::PinnedKind::Playlist => home.playlists.iter().any(|c| c.id() == id),
-            settings::PinnedKind::Album => home.albums.iter().any(|c| c.id() == id),
-            settings::PinnedKind::Artist => home.artists.iter().any(|c| c.id() == id),
-            settings::PinnedKind::Track => home.is_track_liked(id),
-        }
-    }
-
-    /// Remove a pinned album, artist or track from the user's library, and
-    /// unpin it as it can no longer be pinned from its detail page.
-    pub(super) fn remove_from_library(&self, kind: settings::PinnedKind, id: String) {
-        if kind == settings::PinnedKind::Playlist {
-            self.unfollow_playlist(id);
-            return;
-        }
-        let user_id = self.logged_user_id();
         let api = self.app_model.api();
-        dispatch_api_call_many(&self.dispatcher, move || async move {
-            let removed: AppAction = match kind {
-                settings::PinnedKind::Album => {
-                    api.remove_albums(&id).await?;
-                    BrowserAction::UnsaveAlbum(id.clone()).into()
-                }
-                settings::PinnedKind::Artist => {
-                    api.unfollow_artists(&id).await?;
-                    BrowserAction::UnfollowArtist(id.clone()).into()
-                }
-                _ => {
-                    api.remove_tracks(vec![id.clone()]).await?;
-                    BrowserAction::RemoveSavedTracks(vec![id.clone()]).into()
-                }
-            };
-            let mut actions = vec![removed];
-            if user_id.is_some_and(|user_id| settings::unpin_object(&user_id, kind, &id)) {
-                actions.push(BrowserAction::NotifyPinnedPlaylistsUpdated.into());
-            }
-            Ok(actions)
+        dispatch_api_call(&self.dispatcher, move || async move {
+            Ok(library::set_saved(&api, item, false).await?.into())
         });
     }
 
@@ -257,7 +178,7 @@ impl NavigationPanelModel {
             | NavigationPanelDestination::SavedPlaylists
             | NavigationPanelDestination::SavedArtists => {
                 let page = dest.home_page().expect("home destination");
-                vec![BrowserAction::Navigate(Route::Home(page)).into()]
+                vec![NavigationAction::Go(Route::Home(page)).into()]
             }
             NavigationPanelDestination::Playlist(PlaylistSummary { id, .. }) => {
                 vec![AppAction::ViewPlaylist(id)]
@@ -284,118 +205,38 @@ impl NavigationPanelModel {
     }
 
     /// Play a single track in the context of its album.
-    ///
-    /// `PlaybackAction::Load` only plays songs already in the queue, so the
-    /// album is queued first.
     pub(super) fn play_track(&self, id: String) {
         let api = self.app_model.api();
         dispatch_api_read_many(&self.dispatcher, move |tag| async move {
             let track = api.get_track(&id, tag).await?;
-            let album_id = track.album.as_ref().map(|a| a.rri.id.clone());
-            let mut actions: Vec<AppAction> = vec![PlaybackAction::SetShuffled(false).into()];
-            match album_id {
-                Some(album_id) => {
-                    let batch = api
-                        .get_album_tracks(&album_id, 0, CONTEXT_PAGE_SIZE, tag)
-                        .await?;
-                    let source = SongsSource::Album(album_id);
-                    let name = track.album.as_ref().map(|album| album.name.clone());
-                    let load = if batch.items.iter().any(|t| t.rri.id == id) {
-                        PlaybackAction::LoadPagedSongs(source.clone(), batch)
-                    } else {
-                        PlaybackAction::LoadContextSongs(source.clone(), vec![track])
-                    };
-                    actions.push(PlaybackAction::ReplaceQueue.into());
-                    actions.extend(load_context(source, name, load));
+            let context = match track.album {
+                Some(album) => {
+                    PlayContext::whole(SongsSource::Album(album.rri.id), Some(album.name))
                 }
-                None => {
-                    #[allow(deprecated)]
-                    actions.push(PlaybackAction::LoadSongs(vec![track]).into());
-                }
-            }
-            actions.push(PlaybackAction::Load(id).into());
-            Ok(actions)
+                None => PlayContext {
+                    source: SongsSource::Search(track.title),
+                    name: None,
+                    tracks: vec![id.clone()],
+                },
+            };
+            Ok(playback_actions(context.play(Some(id), Some(false))))
         });
     }
 
     pub(super) fn toggle_pin_playlist(&self, id: &str) {
-        let Some(user_id) = self.logged_user_id() else {
-            return;
-        };
-        let changed = if settings::is_object_pinned(&user_id, id, settings::PinnedKind::Playlist) {
-            settings::unpin_object(&user_id, settings::PinnedKind::Playlist, id)
-        } else if !self.is_in_library(settings::PinnedKind::Playlist, id) {
-            // Only saved playlists can be pinned.
-            return;
+        let library = &self.app_model.get_state().library;
+        let action = if library.is_pinned(PinKind::Playlist, id) {
+            LibraryAction::Unpin(PinKind::Playlist, id.to_string())
         } else {
-            let title = self.saved_playlist_title(id);
-            settings::pin_object(&user_id, settings::PinnedKind::Playlist, id, title)
+            let title = library.playlist(id).map(|p| p.title.clone());
+            LibraryAction::Pin(Pin::new(PinKind::Playlist, id, title))
         };
-        if changed {
-            self.dispatcher
-                .dispatch(BrowserAction::NotifyPinnedPlaylistsUpdated.into());
-        }
+        self.dispatcher.dispatch(action.into());
     }
 
-    pub(super) fn unpin(&self, kind: settings::PinnedKind, id: &str) {
-        let Some(user_id) = self.logged_user_id() else {
-            return;
-        };
-        if settings::unpin_object(&user_id, kind, id) {
-            self.dispatcher
-                .dispatch(BrowserAction::NotifyPinnedPlaylistsUpdated.into());
-        }
-    }
-
-    fn saved_playlist_title(&self, id: &str) -> Option<String> {
-        self.app_model
-            .get_state()
-            .browser
-            .home_state()?
-            .playlists
-            .iter()
-            .find(|c| c.id() == id)
-            .map(|c| c.title())
-    }
-
-    fn prune_stale_pins(&self) {
-        if !is_enabled(FeatureFlag::PinnedObjects) {
-            return;
-        }
-        let Some(user_id) = self.logged_user_id() else {
-            return;
-        };
-        // Only playlist pins can be pruned reliably: the saved-playlists list
-        // is the authoritative set of playlists that still exist. Albums,
-        // artists and tracks are pinned from detail pages that may be opened
-        // before the corresponding home lists are loaded, so pruning against
-        // those lists could drop valid pins.
-        //
-        // Even for playlists, prune only once every page has been loaded,
-        // otherwise pins past the loaded pages (or all pins, before the first
-        // page arrives) would be dropped.
-        let fully_loaded = self
-            .app_model
-            .get_state()
-            .browser
-            .home_state()
-            .is_some_and(|home| home.next_playlists_page.next_offset.is_none());
-        if !fully_loaded {
-            return;
-        }
-        let saved_ids: Vec<String> = self
-            .get_playlists()
-            .into_iter()
-            .filter_map(|destination| {
-                if let NavigationPanelDestination::Playlist(summary) = destination {
-                    Some(summary.id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let _ =
-            settings::prune_pinned_objects(&user_id, settings::PinnedKind::Playlist, &saved_ids);
+    pub(super) fn unpin(&self, kind: PinKind, id: &str) {
+        self.dispatcher
+            .dispatch(LibraryAction::Unpin(kind, id.to_string()).into());
     }
 
     /// Rebuild the pinned and playlist rows of `list_store`.
@@ -409,7 +250,6 @@ impl NavigationPanelModel {
         list_store: &gio::ListStore,
         num_fixed_entries: u32,
     ) {
-        self.prune_stale_pins();
         let (pinned, playlists) = self.build_navigation_panel_items();
         let position = |id: &str| {
             (0..list_store.n_items()).find(|&i| {
@@ -434,116 +274,47 @@ impl NavigationPanelModel {
         );
     }
 
-    fn pinned_title_for(&self, object: &settings::PinnedObject) -> String {
-        let fallback = match object.kind {
-            settings::PinnedKind::Playlist => gettext("Pinned Playlist"),
-            settings::PinnedKind::Album => gettext("Pinned Album"),
-            settings::PinnedKind::Artist => gettext("Pinned Artist"),
-            settings::PinnedKind::Track => gettext("Pinned Track"),
-        };
-        let fallback = object.title.clone().unwrap_or(fallback);
-        let state = self.app_model.get_state();
-        let Some(home) = state.browser.home_state() else {
-            return fallback;
-        };
-        match object.kind {
-            settings::PinnedKind::Playlist => home
-                .playlists
-                .iter()
-                .find(|c| c.id() == object.id)
-                .map(|c| c.title())
-                .unwrap_or(fallback),
-            settings::PinnedKind::Album => home
-                .albums
-                .iter()
-                .find(|c| c.id() == object.id)
-                .map(|c| c.title())
-                .unwrap_or(fallback),
-            settings::PinnedKind::Artist => home
-                .artists
-                .iter()
-                .find(|c| c.id() == object.id)
-                .map(|c| c.title())
-                .unwrap_or(fallback),
-            settings::PinnedKind::Track => home
-                .saved_tracks
-                .get(&object.id)
-                .map(|sm| sm.description().title.clone())
-                .unwrap_or(fallback),
-        }
+    fn pinned_title(&self, pin: &Pin) -> String {
+        let title = self.app_model.get_state().library.pin_title(pin);
+        title.unwrap_or_else(|| match pin.kind {
+            PinKind::Playlist => gettext("Pinned Playlist"),
+            PinKind::Album => gettext("Pinned Album"),
+            PinKind::Artist => gettext("Pinned Artist"),
+            PinKind::Track => gettext("Pinned Track"),
+        })
     }
 
-    fn to_pinned_item(&self, object: settings::PinnedObject) -> NavigationPanelItem {
-        let title = self.pinned_title_for(&object);
-        NavigationPanelItem::from_destination(match object.kind {
-            settings::PinnedKind::Playlist => {
-                NavigationPanelDestination::Playlist(PlaylistSummary {
-                    id: object.id,
-                    title,
-                })
+    fn to_pinned_item(&self, pin: &Pin) -> NavigationPanelItem {
+        let title = self.pinned_title(pin);
+        let id = pin.id.clone();
+        NavigationPanelItem::from_destination(match pin.kind {
+            PinKind::Playlist => {
+                NavigationPanelDestination::Playlist(PlaylistSummary { id, title })
             }
-            settings::PinnedKind::Album => NavigationPanelDestination::Album {
-                id: object.id,
-                title,
-            },
-            settings::PinnedKind::Artist => NavigationPanelDestination::Artist {
-                id: object.id,
-                title,
-            },
-            settings::PinnedKind::Track => NavigationPanelDestination::Track {
-                id: object.id,
-                title,
-            },
+            PinKind::Album => NavigationPanelDestination::Album { id, title },
+            PinKind::Artist => NavigationPanelDestination::Artist { id, title },
+            PinKind::Track => NavigationPanelDestination::Track { id, title },
         })
     }
 
     /// Build the pinned rows (with their section header) and the playlist rows.
     fn build_navigation_panel_items(&self) -> (Vec<NavigationPanelItem>, Vec<NavigationPanelItem>) {
-        let mut pinned_items = Vec::new();
-        let mut items = Vec::new();
-        let pinned_enabled = is_enabled(FeatureFlag::PinnedObjects);
-        let playlists = self.get_playlists();
-        let pinned: Vec<settings::PinnedObject> = self
-            .logged_user_id()
-            .map(|user_id| settings::get_pinned_objects(&user_id))
-            .unwrap_or_default();
-        let pinned_playlist_ids: Vec<String> = pinned
-            .iter()
-            .filter(|o| o.kind == settings::PinnedKind::Playlist)
-            .map(|o| o.id.clone())
-            .collect();
-
-        if pinned_enabled {
-            if !pinned.is_empty() {
-                pinned_items.push(NavigationPanelItem::pinned_section());
-                for object in pinned {
-                    pinned_items.push(self.to_pinned_item(object));
-                }
-            }
-
-            let mut unpinned = Vec::new();
-            for p in playlists {
-                if let NavigationPanelDestination::Playlist(ref summary) = p {
-                    if pinned_playlist_ids.contains(&summary.id) {
-                        continue;
-                    }
-                }
-                unpinned.push(p);
-            }
-
-            items.extend(
-                unpinned
-                    .into_iter()
-                    .map(NavigationPanelItem::from_destination),
-            );
-        } else {
-            items.extend(
-                playlists
-                    .into_iter()
-                    .map(NavigationPanelItem::from_destination),
-            );
+        let state = self.app_model.get_state();
+        let library = &state.library;
+        if !is_enabled(FeatureFlag::PinnedObjects) {
+            let playlists = library.playlists().iter();
+            return (vec![], playlists.map(Self::to_item).collect());
         }
+        let mut pinned = vec![];
+        if !library.pins().is_empty() {
+            pinned.push(NavigationPanelItem::pinned_section());
+            pinned.extend(library.pins().iter().map(|pin| self.to_pinned_item(pin)));
+        }
+        let playlists = library.unpinned_playlists().map(Self::to_item).collect();
+        (pinned, playlists)
+    }
 
-        (pinned_items, items)
+    fn to_item(playlist: &Playlist) -> NavigationPanelItem {
+        NavigationPanelItem::from_destination(Self::map_to_destination(playlist))
     }
 }

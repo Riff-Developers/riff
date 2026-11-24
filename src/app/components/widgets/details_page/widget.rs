@@ -9,9 +9,9 @@ use libadwaita::subclass::prelude::*;
 
 use crate::app::components::display_add_css_provider;
 use crate::app::components::utils::{decode_px, set_missing_art};
-use crate::app::load;
 use crate::app::models::ImageSet;
 use riff_api::models::is_resource_url;
+use riff_core::load;
 
 use super::{DetailsHeader, DetailsHeaderWidget, HeaderImageShape, HEADER_IMAGE_SIZE};
 
@@ -126,8 +126,6 @@ impl DetailsPage {
             let url = url.to_string();
             let weak_header = self.header.widget_weak();
             let weak = self.widget.imp().scroll_child.downgrade();
-            // Captured before spawning, so it describes the view that opened
-            // this page.
             let tag = load::hero();
             let size = decode_px(HEADER_IMAGE_SIZE);
             glib::MainContext::default().spawn_local(async move {

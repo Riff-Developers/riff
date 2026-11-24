@@ -211,11 +211,9 @@ Finally, we need our component to listen to relevant events, and update our widg
 ```rust
 impl EventListener for PlaybackControl {
     fn on_event(&mut self, event: &AppEvent) {
-        match event {
-            AppEvent::PlaybackEvent(PlaybackEvent::PlaybackPaused)
-            | AppEvent::PlaybackEvent(PlaybackEvent::PlaybackResumed) => {
-                let is_playing = self.model.is_playing();
-                self.widget.set_playing(is_playing);
+        if let Some(playback) = event.playback() {
+            if playback.changed.contains(PlaybackFields::STATUS) {
+                self.widget.set_playing(playback.state.is_playing());
             }
             /**/
         }

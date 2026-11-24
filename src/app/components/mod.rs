@@ -12,10 +12,11 @@ use std::future::Future;
 use std::sync::Arc;
 
 use crate::app::models::Track;
-use crate::app::{
-    load, playlist_actions, AppAction, AppEvent, AppModel, BrowserAction, Dispatcher,
-};
+use crate::app::state::Action;
+use crate::app::state::{LibraryAction, PlaylistFields, SessionAction};
+use crate::app::{AppAction, AppEvent, AppModel, Dispatcher};
 use riff_api::{ApiService, DomainError, Load, LoadPriority};
+use riff_core::{library, load};
 
 mod pages;
 pub use pages::*;
@@ -29,8 +30,11 @@ pub use shell::*;
 mod player_notifier;
 pub use player_notifier::PlayerNotifier;
 
+mod screen;
+pub use screen::ScreenModel;
+
 mod queue_loader;
-pub use queue_loader::{fetch_queue_page, queue_source_tracks, QueueLoader};
+pub use queue_loader::queue_source_tracks;
 
 mod constants;
 pub use constants::*;
@@ -42,7 +46,6 @@ pub mod labels;
 pub mod clipboard_link;
 pub use clipboard_link::{copy_link_to_clipboard, is_app_copied_link};
 
-// without this the builder doesn't seen to know about the custom widgets
 pub fn expose_custom_widgets() {
     shell::playback::expose_widgets();
     widgets::selection::expose_widgets();
@@ -83,13 +86,17 @@ pub fn add_tracks_to_playlist(
 ) {
     let api = app_model.api();
     let state = app_model.get_state();
-    let lacks_cover = playlist_actions::playlist_lacks_cover(&state, &id);
-    let title = playlist_actions::playlist_title(&state, &id).unwrap_or_default();
+    let lacks_cover = state.library.playlist_lacks_cover(&id);
+    let title = state
+        .library
+        .playlist(&id)
+        .map(|p| p.title.clone())
+        .unwrap_or_default();
     drop(state);
     let cover_dispatcher = dispatcher.clone();
     let tag = load::visible();
     dispatch_api_call_many(dispatcher, move || async move {
-        let added = playlist_actions::add_tracks_to_playlist(&api, &id, tracks, tag).await?;
+        let added = library::add_tracks_to_playlist(&api, &id, tracks, tag).await?;
         let mut actions: Vec<AppAction> = then.into_iter().collect();
         if added.tracks.is_empty() {
             actions.push(AppAction::ShowNotification(
@@ -100,7 +107,9 @@ pub fn add_tracks_to_playlist(
         if lacks_cover {
             refresh_playlist_cover(&cover_dispatcher, api, id.clone(), true);
         }
-        actions.push(BrowserAction::AddTracksToPlaylist(id, added.tracks).into());
+        actions.push(
+            LibraryAction::PlaylistEdited(id, PlaylistFields::INFO | PlaylistFields::TRACKS).into(),
+        );
         actions.push(AppAction::ShowNotification(if added.skipped == 0 {
             labels::added_to_playlist_label(&title)
         } else {
@@ -118,8 +127,8 @@ pub fn upload_playlist_cover(
 ) {
     let tag = load::visible();
     dispatch_api_call_many(dispatcher, move || async move {
-        match playlist_actions::upload_playlist_cover(&api, id.clone(), cover, tag).await {
-            Ok(actions) => Ok(actions),
+        match library::upload_playlist_cover(&api, id.clone(), cover, tag).await {
+            Ok(art) => Ok(art.into_iter().map(AppAction::from).collect()),
             Err(e) => {
                 error!("could not upload the cover of playlist {id}: {e}");
                 Ok(vec![AppAction::ShowNotification(gettext(
@@ -138,7 +147,11 @@ pub fn refresh_playlist_cover(
     poll: bool,
 ) {
     dispatch_api_call_many(dispatcher, move || async move {
-        Ok(playlist_actions::refresh_playlist_cover(&api, id, poll).await)
+        let cover = library::refreshed_playlist_cover(&api, &id, poll).await;
+        Ok(cover
+            .map(|art| AppAction::Core(LibraryAction::SetPlaylistArt(id, art).into()))
+            .into_iter()
+            .collect())
     })
 }
 
@@ -167,30 +180,6 @@ where
     spawn_api_call(dispatcher, move || call(load))
 }
 
-pub fn dispatch_api_read_with_fallback<F, C, OnFail>(
-    dispatcher: &Dispatcher,
-    call: C,
-    on_fail: OnFail,
-) where
-    C: 'static + Send + Clone + FnOnce(Load) -> F,
-    F: 'static + Send + Future<Output = Result<AppAction, DomainError>>,
-    OnFail: 'static + Send + FnOnce() -> AppAction,
-{
-    let load = load::at(LoadPriority::Visible);
-    let dispatcher = dispatcher.clone();
-    tokio::spawn(async move {
-        let (mut actions, succeeded) = resolve_api_call(move || {
-            let call = call.clone();
-            async move { call(load).await.map(|a| vec![a]) }
-        })
-        .await;
-        if !succeeded {
-            actions.push(on_fail());
-        }
-        dispatcher.dispatch_many(actions);
-    });
-}
-
 fn spawn_api_call<F, C>(dispatcher: &Dispatcher, call: C)
 where
     C: 'static + Send + Clone + FnOnce() -> F,
@@ -202,6 +191,30 @@ where
     });
 }
 
+pub fn error_actions(err: DomainError) -> Vec<AppAction> {
+    match err {
+        DomainError::NoToken | DomainError::Shed => vec![],
+        DomainError::RateLimited { .. } => {
+            error!("Spotify API error: rate limited");
+            vec![AppAction::ShowNotification(gettext(
+                // translators: This notification is shown when Spotify throttles requests.
+                "Rate limited by Spotify. Please wait a moment and try again.",
+            ))]
+        }
+        err => {
+            #[cfg(debug_assertions)]
+            if riff_api::is_simulate_offline() {
+                return vec![];
+            }
+            error!("Spotify API error: {}", err);
+            vec![AppAction::ShowNotification(gettext(
+                // translators: This notification is the default message for unhandled errors. Logs refer to console output.
+                "An error occured. Check logs for details!",
+            ))]
+        }
+    }
+}
+
 /// Resolves an api call to the actions it produces, alongside whether the
 /// underlying call ultimately succeeded (after any internal auth retry).
 async fn resolve_api_call<F, C>(call: C) -> (Vec<AppAction>, bool)
@@ -210,42 +223,18 @@ where
     F: Future<Output = Result<Vec<AppAction>, DomainError>>,
 {
     let first_call = call.clone();
-    let result = first_call().await;
-    match result {
+    match first_call().await {
         Ok(actions) => (actions, true),
-        Err(DomainError::NoToken) => (vec![], false),
-        Err(DomainError::Shed) => (vec![], false),
-        Err(DomainError::AuthExpired) => {
-            let retried = call().await;
-            let ok = retried.is_ok();
-            (retried.unwrap_or_else(|_| Vec::new()), ok)
-        }
-        Err(DomainError::RateLimited { .. }) => {
-            error!("Spotify API error: rate limited");
-            (
-                vec![AppAction::ShowNotification(gettext(
-                    // translators: This notification is shown when Spotify throttles requests.
-                    "Rate limited by Spotify. Please wait a moment and try again.",
+        Err(DomainError::AuthExpired) => match call().await {
+            Ok(actions) => (actions, true),
+            Err(_) => (
+                vec![AppAction::Core(Action::Session(
+                    SessionAction::TokenRejected,
                 ))],
                 false,
-            )
-        }
-        Err(err) => {
-            // "Simulate Offline" surfaces as a network error in debug builds;
-            // the connection-lost banner already covers it, so skip the toast.
-            #[cfg(debug_assertions)]
-            if riff_api::is_simulate_offline() {
-                return (vec![], false);
-            }
-            error!("Spotify API error: {}", err);
-            (
-                vec![AppAction::ShowNotification(gettext(
-                    // translators: This notification is the default message for unhandled errors. Logs refer to console output.
-                    "An error occured. Check logs for details!",
-                ))],
-                false,
-            )
-        }
+            ),
+        },
+        Err(err) => (error_actions(err), false),
     }
 }
 

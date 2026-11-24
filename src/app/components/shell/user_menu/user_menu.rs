@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use super::UserMenuModel;
 use crate::app::components::{EventListener, Settings};
-use crate::app::{state::LoginEvent, AppEvent};
+use crate::app::{state::SessionStatus, AppEvent};
 
 pub struct UserMenu {
     model: Rc<UserMenuModel>,
@@ -48,7 +48,6 @@ impl UserMenu {
         parent.add_action(&{
             let show_shortcuts_action = SimpleAction::new("show-shortcuts", None);
             show_shortcuts_action.connect_activate(clone!(
-                // Nothing else keeps the dialog alive
                 #[strong]
                 shortcuts_dialog,
                 #[weak]
@@ -91,7 +90,11 @@ impl UserMenu {
 
 impl EventListener for UserMenu {
     fn on_event(&mut self, event: &AppEvent) {
-        if let AppEvent::LoginEvent(LoginEvent::LoginCompleted) | AppEvent::Started = event {
+        if matches!(event, AppEvent::Started)
+            || event
+                .session()
+                .is_some_and(|s| s.became(&SessionStatus::LoggedIn))
+        {
             self.model.fetch_user_playlists();
         }
     }

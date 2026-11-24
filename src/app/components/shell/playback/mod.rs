@@ -5,6 +5,7 @@ mod playback_info;
 mod playback_widget;
 mod queue_bar;
 pub use component::*;
+pub use playback_widget::PlaybackWidget;
 pub use queue_bar::{BarTrack, QueueBarWidget};
 
 use glib::prelude::*;

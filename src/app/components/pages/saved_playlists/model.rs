@@ -1,19 +1,18 @@
-use std::cell::{Cell, Ref};
+use std::cell::{Cell, RefCell};
 use std::ops::Deref;
 use std::rc::Rc;
 
 use gettextrs::gettext;
 
 use crate::app::components::{
-    dispatch_api_read, playing_card, CardFilter, CardLayout, CardListComponent, CardListModel,
-    CardListPageModel, CardSize, ImageShape, PlayingCard, SortOrder,
+    dispatch_api_read, playing_card, sync_cards, CardFilter, CardLayout, CardListComponent,
+    CardListModel, CardListPageModel, CardSize, ImageShape, PlayingCard, SortOrder,
 };
 use crate::app::models::*;
-use crate::app::state::HomeState;
-use crate::app::{
-    AppAction, AppEvent, AppModel, BrowserAction, BrowserEvent, Dispatcher, ListStore,
-    PaginationTarget,
-};
+use crate::app::state::LibraryAction;
+use crate::app::state::LibraryFields;
+use crate::app::{AppAction, AppEvent, AppModel, Dispatcher, ListStore};
+use riff_core::library;
 
 const OWNED_FILTER: &str = "owned";
 const FOLLOWED_FILTER: &str = "followed";
@@ -21,6 +20,7 @@ const FOLLOWED_FILTER: &str = "followed";
 pub struct SavedPlaylistsModel {
     app_model: Rc<AppModel>,
     dispatcher: Dispatcher,
+    cards: RefCell<ListStore<CardModel>>,
 }
 
 impl SavedPlaylistsModel {
@@ -28,11 +28,20 @@ impl SavedPlaylistsModel {
         Self {
             app_model,
             dispatcher,
+            cards: RefCell::new(ListStore::new()),
         }
     }
 
-    fn state(&self) -> Option<Ref<'_, HomeState>> {
-        self.app_model.map_state_opt(|s| s.browser.home_state())
+    fn sync_cards(&self) {
+        let cards = self
+            .app_model
+            .get_state()
+            .library
+            .playlists()
+            .iter()
+            .map(CardModel::from)
+            .collect();
+        sync_cards(&self.cards.borrow(), cards);
     }
 }
 
@@ -42,54 +51,23 @@ impl CardListModel for SavedPlaylistsModel {
     }
 
     fn get_store(&self) -> Option<impl Deref<Target = ListStore<CardModel>> + '_> {
-        Some(Ref::map(self.state()?, |s| &s.playlists))
+        Some(self.cards.borrow())
     }
 
     fn refresh(&self) {
         let api = self.app_model.api();
-        if let Some(state) = self.state() {
-            let batch_size = state.next_playlists_page.batch_size;
-            drop(state);
-            dispatch_api_read(&self.dispatcher, move |tag| async move {
-                api.get_saved_playlists(0, batch_size, tag)
-                    .await
-                    .map(|page| BrowserAction::SetPlaylistsContent(page.items).into())
-            });
-        }
+        dispatch_api_read(&self.dispatcher, move |tag| async move {
+            library::load_saved_playlists(&api, tag)
+                .await
+                .map(|playlists| LibraryAction::PlaylistsLoaded(playlists).into())
+        });
     }
 
     fn has_items(&self) -> bool {
-        self.get_store().map(|s| s.len() > 0).unwrap_or(false)
+        !self.cards.borrow().is_empty()
     }
 
-    fn has_more(&self) -> bool {
-        self.state()
-            .map(|s| s.next_playlists_page.next_offset.is_some())
-            .unwrap_or(false)
-    }
-
-    fn load_more(&self) {
-        let api = self.app_model.api();
-        let state = match self.state() {
-            Some(s) => s,
-            None => return,
-        };
-        let batch_size = state.next_playlists_page.batch_size;
-        let offset = match state.next_playlists_page.next_offset {
-            Some(o) => o,
-            None => return,
-        };
-        drop(state);
-
-        self.app_model
-            .update_state(BrowserAction::ConsumeNextPage(PaginationTarget::SavedPlaylists).into());
-
-        dispatch_api_read(&self.dispatcher, move |tag| async move {
-            api.get_saved_playlists(offset, batch_size, tag)
-                .await
-                .map(|page| BrowserAction::AppendPlaylistsContent(page.items).into())
-        });
-    }
+    fn load_more(&self) {}
 
     fn open_item(&self, id: String) {
         self.dispatcher.dispatch(AppAction::ViewPlaylist(id));
@@ -111,7 +89,7 @@ impl CardListModel for SavedPlaylistsModel {
     }
 
     fn resolve_filter(&self, category: &str) -> Option<CardFilter> {
-        let user = self.app_model.get_state().logged_user.user.clone()?;
+        let user = self.app_model.get_state().session.user.clone()?;
         match category {
             OWNED_FILTER => Some(CardFilter::OwnedBy(user)),
             FOLLOWED_FILTER => Some(CardFilter::NotOwnedBy(user)),
@@ -139,11 +117,14 @@ impl CardListPageModel for SavedPlaylistsModel {
         ]
     }
 
+    fn apply_event(&self, event: &AppEvent) {
+        if event.library_changed(LibraryFields::PLAYLISTS) {
+            self.sync_cards();
+        }
+    }
+
     fn should_refresh(&self, event: &AppEvent) -> bool {
-        matches!(
-            event,
-            AppEvent::BrowserEvent(BrowserEvent::SavedPlaylistsUpdated)
-        )
+        event.library_changed(LibraryFields::PLAYLISTS)
     }
 }
 

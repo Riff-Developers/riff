@@ -1,5 +1,3 @@
-//! Spotify vendor implementation.
-
 use std::sync::Arc;
 
 use crate::service::ApiService;
@@ -8,6 +6,7 @@ use crate::token::TokenProvider;
 mod converter;
 pub mod domain;
 mod internal_api;
+mod link;
 mod request;
 
 use domain::SpotifyDomain;
@@ -21,3 +20,6 @@ pub fn spotify_service(
     let provider = Arc::new(SpotifyDomain::new(token_provider, session_token_provider));
     ApiService::new(provider, memory_cache_bytes, disk_cache_bytes)
 }
+pub use link::parse_link;
+
+use internal_api::connect_state::context_uri;

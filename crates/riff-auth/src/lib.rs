@@ -9,6 +9,7 @@ extern crate log;
 
 mod credentials;
 mod oauth2;
+mod player_key;
 mod session_tokens;
 mod token_store;
 
@@ -16,5 +17,6 @@ pub use credentials::Credentials;
 pub use oauth2::{
     AuthcodeChallenge, LoginCredentials, OAuthError, RiffOauthClient, SESSION_CLIENT_ID,
 };
+pub use player_key::PlayerKey;
 pub use session_tokens::SessionTokens;
 pub use token_store::TokenStore;

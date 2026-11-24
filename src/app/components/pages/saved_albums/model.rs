@@ -1,35 +1,45 @@
-use std::cell::{Cell, Ref};
+use std::cell::Cell;
 use std::ops::Deref;
 use std::rc::Rc;
 
 use gettextrs::gettext;
 
+use crate::app::components::sync_cards;
 use crate::app::components::{
-    dispatch_api_read, playing_card, CardLayout, CardListComponent, CardListModel,
-    CardListPageModel, CardSize, ImageShape, PlayingCard, SortOrder,
+    playing_card, CardLayout, CardListComponent, CardListModel, CardListPageModel, CardSize,
+    ImageShape, PlayingCard, ScreenModel, SortOrder,
 };
 use crate::app::models::*;
-use crate::app::state::HomeState;
-use crate::app::{
-    AppAction, AppEvent, AppModel, BrowserAction, BrowserEvent, Dispatcher, ListStore,
-    PaginationTarget,
-};
+use crate::app::state::{HomePage, Route};
+use crate::app::{AppAction, AppEvent, AppModel, Dispatcher, ListStore};
+use riff_core::screens::SavedAlbumsScreen;
 
 pub struct SavedAlbumsModel {
     app_model: Rc<AppModel>,
     dispatcher: Dispatcher,
+    screen: ScreenModel<SavedAlbumsScreen>,
+    cards: Rc<ListStore<CardModel>>,
 }
 
 impl SavedAlbumsModel {
     pub fn new(app_model: Rc<AppModel>, dispatcher: Dispatcher) -> Self {
+        let cards = Rc::new(ListStore::new());
+        let store = Rc::clone(&cards);
+        let screen = ScreenModel::new(
+            SavedAlbumsScreen::default(),
+            &app_model,
+            dispatcher.clone(),
+            move |screen, _| {
+                let albums = &screen.albums.items;
+                sync_cards(&store, albums.iter().map(CardModel::from).collect());
+            },
+        );
         Self {
             app_model,
             dispatcher,
+            screen,
+            cards,
         }
-    }
-
-    fn state(&self) -> Option<Ref<'_, HomeState>> {
-        self.app_model.map_state_opt(|s| s.browser.home_state())
     }
 }
 
@@ -39,53 +49,23 @@ impl CardListModel for SavedAlbumsModel {
     }
 
     fn get_store(&self) -> Option<impl Deref<Target = ListStore<CardModel>> + '_> {
-        Some(Ref::map(self.state()?, |s| &s.albums))
+        Some(self.cards.as_ref())
     }
 
     fn refresh(&self) {
-        let api = self.app_model.api();
-        if let Some(state) = self.state() {
-            let batch_size = state.next_albums_page.batch_size;
-            drop(state);
-            dispatch_api_read(&self.dispatcher, move |tag| async move {
-                api.get_saved_albums(0, batch_size, tag)
-                    .await
-                    .map(|page| BrowserAction::SetLibraryContent(page.items).into())
-            });
-        }
+        self.screen.open();
     }
 
     fn has_items(&self) -> bool {
-        self.get_store().map(|s| s.len() > 0).unwrap_or(false)
+        !self.cards.is_empty()
     }
 
     fn has_more(&self) -> bool {
-        self.state()
-            .map(|s| s.next_albums_page.next_offset.is_some())
-            .unwrap_or(false)
+        self.screen.get().albums.has_more()
     }
 
     fn load_more(&self) {
-        let api = self.app_model.api();
-        let state = match self.state() {
-            Some(s) => s,
-            None => return,
-        };
-        let batch_size = state.next_albums_page.batch_size;
-        let offset = match state.next_albums_page.next_offset {
-            Some(o) => o,
-            None => return,
-        };
-        drop(state);
-
-        self.app_model
-            .update_state(BrowserAction::ConsumeNextPage(PaginationTarget::SavedAlbums).into());
-
-        dispatch_api_read(&self.dispatcher, move |tag| async move {
-            api.get_saved_albums(offset, batch_size, tag)
-                .await
-                .map(|page| BrowserAction::AppendLibraryContent(page.items).into())
-        });
+        self.screen.load_more();
     }
 
     fn open_item(&self, id: String) {
@@ -122,8 +102,12 @@ impl CardListPageModel for SavedAlbumsModel {
         ]
     }
 
+    fn apply_event(&self, event: &AppEvent) {
+        self.screen.apply(event);
+    }
+
     fn should_refresh(&self, event: &AppEvent) -> bool {
-        matches!(event, AppEvent::BrowserEvent(BrowserEvent::LibraryUpdated))
+        event.page_loaded(&Route::Home(HomePage::Library)).is_some()
     }
 }
 

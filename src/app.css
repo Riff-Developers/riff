@@ -79,6 +79,52 @@ headerbar .header-button--removed {
   animation: header-button-removed 250ms ease-in forwards;
 }
 
+
+@keyframes welcome-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(320px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+
+.welcome--entering > * {
+  animation: welcome-slide-in 800ms cubic-bezier(0.37, 0, 0.63, 1) backwards;
+}
+
+.welcome--entering > :nth-child(2) {
+  animation-delay: 80ms;
+}
+
+.welcome--entering > :nth-child(3) {
+  animation-delay: 160ms;
+}
+
+.guide .guide-expand {
+  opacity: 0;
+  transition: opacity 200ms ease;
+  /* Dark and see-through, so it stands out over any frame of the video */
+  background-color: rgb(0 0 0 / 65%);
+  color: white;
+  /* In the middle of the video, as its one control */
+  min-width: 48px;
+  min-height: 48px;
+}
+
+.guide .guide-expand:hover {
+  background-color: rgb(0 0 0 / 80%);
+}
+
+.guide:hover .guide-expand,
+.guide .guide-expand:focus-visible {
+  opacity: 1;
+}
+
 /* History menus hang off header bar buttons, whose bold label weight they would inherit */
 popover.history-menu {
   font-weight: normal;

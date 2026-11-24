@@ -3,18 +3,18 @@ use std::ops::Deref;
 use std::rc::Rc;
 
 use crate::app::components::{
-    dispatch_api_call, labels, DetailsPageModel, DeviceSelectorModel, HasHeaderBarModel,
-    HeaderImageShape, PageModel, PinnedPageModel, QueueListModel, SimpleHeaderBarModel,
-    TrackListModel,
+    dispatch_api_call, labels, DetailsPageModel, HasHeaderBarModel, HeaderImageShape, PageModel,
+    PinnedPageModel, QueueListModel, SimpleHeaderBarModel, TrackListModel,
 };
 use crate::app::models::{ArtistRef, ImageSet, Track, TrackExt};
-use crate::app::state::{PlaybackAction, PlaybackEvent};
-use crate::app::{AppAction, AppEvent, AppModel, BrowserAction, BrowserEvent, Dispatcher};
-use crate::settings;
+use crate::app::state::PinKind;
+use crate::app::state::{Event, ItemId, SavedChanged};
+use crate::app::state::{PlaybackAction, PlaybackFields};
+use crate::app::{AppAction, AppEvent, AppModel, Dispatcher};
+use riff_core::library;
 
 const VIEW_ALBUM: &str = "view_album";
 
-/// Data model for the now-playing page. Composes `DetailsPageModel` via Deref.
 pub struct NowPlayingModel {
     base: DetailsPageModel,
     queue_list: Rc<QueueListModel>,
@@ -46,15 +46,11 @@ impl NowPlayingModel {
     }
 
     fn current_song(&self) -> Option<Track> {
-        self.app_model.get_state().playback.header_track()
+        self.app_model.get_state().playback.current_song()
     }
 
     pub fn has_queue(&self) -> bool {
         self.queue_list.has_queue()
-    }
-
-    pub fn device_selector_model(&self) -> DeviceSelectorModel {
-        DeviceSelectorModel::new(self.app_model.clone(), self.dispatcher.clone())
     }
 }
 
@@ -103,7 +99,6 @@ impl PageModel for NowPlayingModel {
         self.queue_list.toggle_play();
     }
 
-    // Unlike other pages, this doesn't replace the queue
     fn shuffle_play(&self) {
         self.dispatcher
             .dispatch(PlaybackAction::ToggleShuffle.into());
@@ -140,13 +135,10 @@ impl PageModel for NowPlayingModel {
     }
 
     fn is_liked(&self) -> bool {
-        if let Some(song) = self.current_song() {
-            let state = self.app_model.get_state();
-            if let Some(home) = state.browser.home_state() {
-                return home.is_track_liked(&song.rri.id);
-            }
-        }
-        false
+        self.current_song().is_some_and(|song| {
+            self.liked.learn(std::slice::from_ref(&song));
+            self.liked.is_liked(&song.rri.id)
+        })
     }
 
     fn toggle_like(&self) {
@@ -157,18 +149,13 @@ impl PageModel for NowPlayingModel {
         let api = self.app_model.api();
         let is_liked = self.is_liked();
 
-        if is_liked {
-            dispatch_api_call(&self.dispatcher, move || async move {
-                api.remove_tracks(vec![id.clone()]).await?;
-                Ok(BrowserAction::RemoveSavedTracks(vec![id]).into())
-            });
-        } else {
-            let song_desc = song.clone();
-            dispatch_api_call(&self.dispatcher, move || async move {
-                api.save_tracks(vec![id]).await?;
-                Ok(BrowserAction::SaveTracks(vec![song_desc]).into())
-            });
-        }
+        dispatch_api_call(&self.dispatcher, move || async move {
+            Ok(
+                library::set_saved(&api, ItemId::Tracks(vec![id]), !is_liked)
+                    .await?
+                    .into(),
+            )
+        });
     }
 
     fn get_subtitle_links(&self) -> Vec<ArtistRef> {
@@ -193,29 +180,30 @@ impl PageModel for NowPlayingModel {
         }
     }
 
-    // The header shows the next queued track when nothing plays
     fn should_refresh_details(&self, event: &AppEvent) -> bool {
-        matches!(
-            event,
-            AppEvent::PlaybackEvent(
-                PlaybackEvent::TrackChanged(_)
-                    | PlaybackEvent::PlaybackStopped
-                    | PlaybackEvent::PlaylistChanged
-            )
-        )
+        event.queue_changed() || event.playback_changed(PlaybackFields::TRACK)
+    }
+
+    fn apply_event(&self, event: &AppEvent) {
+        if let Some(event) = event.core() {
+            self.liked.apply(event);
+        }
     }
 
     fn should_refresh_liked(&self, event: &AppEvent) -> bool {
         matches!(
             event,
-            AppEvent::BrowserEvent(BrowserEvent::SavedTracksUpdated)
+            AppEvent::Core(Event::Saved(SavedChanged {
+                item: ItemId::Tracks(_),
+                ..
+            }))
         )
     }
 }
 
 impl PinnedPageModel for NowPlayingModel {
-    fn pin_kind(&self) -> settings::PinnedKind {
-        settings::PinnedKind::Track
+    fn pin_kind(&self) -> PinKind {
+        PinKind::Track
     }
 
     fn pinned_object_id(&self) -> Option<String> {
@@ -265,7 +253,7 @@ mod tests {
             1024 * 1024,
         ));
         let (sender, mut receiver) = futures::channel::mpsc::unbounded();
-        let app_model = Rc::new(AppModel::new(AppState::new(), api));
+        let app_model = Rc::new(AppModel::new(AppState::default(), api));
         let model = NowPlayingModel::new(app_model.clone(), Dispatcher::new(sender));
         assert_eq!(
             model.header_menu_entries(),
@@ -282,22 +270,23 @@ mod tests {
             name: "An Album".to_string(),
         });
         app_model.update_state(
-            PlaybackAction::LoadContextSongs(
-                SongsSource::Album("album1".into()),
-                vec![track, make_track("2")],
+            riff_core::playback::test_playing_from(
+                Some(SongsSource::Album("album1".into())),
+                track,
+                &[],
+                &[make_track("2")],
             )
             .into(),
         );
-        app_model.update_state(PlaybackAction::Load("1".to_string()).into());
         assert!(model.source_is_playing() && model.is_playing());
 
         model.on_header_menu(VIEW_ALBUM);
         let action = receiver.try_next().ok().flatten().expect("an action");
         assert!(matches!(
             action,
-            AppAction::BrowserAction(BrowserAction::Navigate(
-                crate::app::state::Route::Album(ref id)
-            )) if id == "album1"
+            AppAction::Core(crate::app::state::Action::Browser(crate::app::state::BrowserAction::Navigation(
+                crate::app::state::NavigationAction::Go(crate::app::state::Route::Album(ref id))
+            ))) if id == "album1"
         ));
 
         let events = app_model.update_state(PlaybackAction::Stop.into());

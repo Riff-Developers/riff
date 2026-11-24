@@ -1,35 +1,45 @@
-use std::cell::{Cell, Ref};
+use std::cell::Cell;
 use std::ops::Deref;
 use std::rc::Rc;
 
 use gettextrs::gettext;
 
+use crate::app::components::sync_cards;
 use crate::app::components::{
-    dispatch_api_read, playing_card, CardLayout, CardListComponent, CardListModel,
-    CardListPageModel, CardSize, ImageShape, PlayingCard, SortOrder,
+    playing_card, CardLayout, CardListComponent, CardListModel, CardListPageModel, CardSize,
+    ImageShape, PlayingCard, ScreenModel, SortOrder,
 };
 use crate::app::models::*;
-use crate::app::state::HomeState;
-use crate::app::{
-    AppAction, AppEvent, AppModel, BrowserAction, BrowserEvent, Dispatcher, ListStore,
-    PaginationTarget,
-};
+use crate::app::state::{HomePage, Route};
+use crate::app::{AppAction, AppEvent, AppModel, Dispatcher, ListStore};
+use riff_core::screens::SavedArtistsScreen;
 
 pub struct SavedArtistsModel {
     app_model: Rc<AppModel>,
     dispatcher: Dispatcher,
+    screen: ScreenModel<SavedArtistsScreen>,
+    cards: Rc<ListStore<CardModel>>,
 }
 
 impl SavedArtistsModel {
     pub fn new(app_model: Rc<AppModel>, dispatcher: Dispatcher) -> Self {
+        let cards = Rc::new(ListStore::new());
+        let store = Rc::clone(&cards);
+        let screen = ScreenModel::new(
+            SavedArtistsScreen::default(),
+            &app_model,
+            dispatcher.clone(),
+            move |screen, _| {
+                let artists = &screen.artists;
+                sync_cards(&store, artists.iter().map(CardModel::from).collect());
+            },
+        );
         Self {
             app_model,
             dispatcher,
+            screen,
+            cards,
         }
-    }
-
-    fn state(&self) -> Option<Ref<'_, HomeState>> {
-        self.app_model.map_state_opt(|s| s.browser.home_state())
     }
 }
 
@@ -39,49 +49,23 @@ impl CardListModel for SavedArtistsModel {
     }
 
     fn get_store(&self) -> Option<impl Deref<Target = ListStore<CardModel>> + '_> {
-        Some(Ref::map(self.state()?, |s| &s.artists))
+        Some(self.cards.as_ref())
     }
 
     fn refresh(&self) {
-        let api = self.app_model.api();
-        dispatch_api_read(&self.dispatcher, move |tag| async move {
-            let (artists, cursor) = api.get_followed_artists(None, 30, tag).await?;
-            Ok(BrowserAction::SetSavedArtists(artists, cursor).into())
-        });
+        self.screen.open();
     }
 
     fn has_items(&self) -> bool {
-        self.state().map(|s| !s.artists.is_empty()).unwrap_or(false)
+        !self.cards.is_empty()
     }
 
     fn has_more(&self) -> bool {
-        self.state()
-            .map(|s| s.artists_cursor.as_ref().map_or(false, |c| !c.is_empty()))
-            .unwrap_or(false)
+        self.screen.get().has_more()
     }
 
     fn load_more(&self) {
-        let state = match self.state() {
-            Some(s) => s,
-            None => return,
-        };
-        let cursor = state.artists_cursor.clone();
-        drop(state);
-
-        let after = match cursor {
-            Some(ref c) if c.is_empty() => return,
-            Some(c) => Some(c),
-            None => return,
-        };
-
-        self.app_model
-            .update_state(BrowserAction::ConsumeNextPage(PaginationTarget::SavedArtists).into());
-
-        let api = self.app_model.api();
-        dispatch_api_read(&self.dispatcher, move |tag| async move {
-            let (artists, cursor) = api.get_followed_artists(after.as_deref(), 30, tag).await?;
-            Ok(BrowserAction::AppendSavedArtists(artists, cursor).into())
-        });
+        self.screen.load_more();
     }
 
     fn open_item(&self, id: String) {
@@ -115,11 +99,14 @@ impl CardListPageModel for SavedArtistsModel {
         ]
     }
 
+    fn apply_event(&self, event: &AppEvent) {
+        self.screen.apply(event);
+    }
+
     fn should_refresh(&self, event: &AppEvent) -> bool {
-        matches!(
-            event,
-            AppEvent::BrowserEvent(BrowserEvent::SavedArtistsUpdated)
-        )
+        event
+            .page_loaded(&Route::Home(HomePage::SavedArtists))
+            .is_some()
     }
 }
 

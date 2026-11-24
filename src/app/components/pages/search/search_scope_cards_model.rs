@@ -1,42 +1,58 @@
-// Card-list adapter for the search page's scoped card view (artists/albums/playlists).
-// Reads the single `SearchState`: the active filter, query, and paginated results.
-
-use std::cell::Ref;
 use std::ops::Deref;
 use std::rc::Rc;
 
-use crate::app::components::{CardListModel, ImageShape};
+use crate::app::components::{sync_cards, CardListModel, ImageShape, ScreenModel};
 use crate::app::models::*;
-use crate::app::state::SearchState;
 use crate::app::{AppAction, AppModel, Dispatcher, ListStore};
+
+use riff_core::screens::SearchScreen;
 
 use super::load_more_scope;
 
 pub struct SearchScopeCardsModel {
     app_model: Rc<AppModel>,
     dispatcher: Dispatcher,
+    screen: ScreenModel<SearchScreen>,
+    cards: ListStore<CardModel>,
 }
 
 impl SearchScopeCardsModel {
-    pub fn new(app_model: Rc<AppModel>, dispatcher: Dispatcher) -> Self {
+    pub fn new(
+        app_model: Rc<AppModel>,
+        dispatcher: Dispatcher,
+        screen: ScreenModel<SearchScreen>,
+    ) -> Self {
         Self {
             app_model,
             dispatcher,
+            screen,
+            cards: ListStore::new(),
         }
     }
 
-    fn state(&self) -> Option<Ref<'_, SearchState>> {
-        self.app_model.map_state_opt(|s| s.browser.search_state())
+    /// Shows the filtered results of the search.
+    pub fn sync(&self) {
+        let screen = self.screen.get();
+        let scope = &screen.scope;
+        let cards = match self.filter() {
+            Some(SearchType::Album) => scope.albums.items.iter().map(CardModel::from).collect(),
+            Some(SearchType::Artist) => scope.artists.items.iter().map(CardModel::from).collect(),
+            Some(SearchType::Playlist) => {
+                scope.playlists.items.iter().map(CardModel::from).collect()
+            }
+            _ => vec![],
+        };
+        sync_cards(&self.cards, cards);
     }
 
     fn filter(&self) -> Option<SearchType> {
-        self.state().and_then(|s| s.filter)
+        self.app_model.get_state().browser.search_filter()
     }
 }
 
 impl CardListModel for SearchScopeCardsModel {
     fn get_store(&self) -> Option<impl Deref<Target = ListStore<CardModel>> + '_> {
-        Some(Ref::map(self.state()?, |s| &s.scope_cards))
+        Some(&self.cards)
     }
 
     fn refresh(&self) {}
@@ -46,33 +62,31 @@ impl CardListModel for SearchScopeCardsModel {
     }
 
     fn has_more(&self) -> bool {
-        self.state()
-            .map(|s| s.scope_page.next_offset.is_some())
-            .unwrap_or(false)
+        self.screen.get().has_more()
     }
 
     fn load_more(&self) {
         let Some(search_type) = self.filter() else {
             return;
         };
-        if search_type == SearchType::Tracks {
+        if search_type == SearchType::Track {
             return;
         }
-        load_more_scope(&self.app_model, &self.dispatcher, search_type);
+        load_more_scope(&self.app_model, &self.screen, search_type);
     }
 
     fn open_item(&self, id: String) {
         match self.filter() {
-            Some(SearchType::Albums) => self.dispatcher.dispatch(AppAction::ViewAlbum(id)),
-            Some(SearchType::Artists) => self.dispatcher.dispatch(AppAction::ViewArtist(id)),
-            Some(SearchType::Playlists) => self.dispatcher.dispatch(AppAction::ViewPlaylist(id)),
+            Some(SearchType::Album) => self.dispatcher.dispatch(AppAction::ViewAlbum(id)),
+            Some(SearchType::Artist) => self.dispatcher.dispatch(AppAction::ViewArtist(id)),
+            Some(SearchType::Playlist) => self.dispatcher.dispatch(AppAction::ViewPlaylist(id)),
             _ => {}
         }
     }
 
     fn image_shape(&self) -> ImageShape {
         match self.filter() {
-            Some(SearchType::Artists) => ImageShape::Round,
+            Some(SearchType::Artist) => ImageShape::Round,
             _ => ImageShape::Square,
         }
     }

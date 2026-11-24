@@ -21,6 +21,10 @@ set -euo pipefail
 #   --reconfigure     Force reconfigure even if build dir exists
 #   --features LIST   Comma-separated list of features to enable
 #   --install         Install after building (dev/release only)
+#   --fresh-install   Install as if for the first time (dev/release only):
+#                     once the build succeeds, removes everything Riff keeps
+#                     for this user (data, caches, Soloist and its pairing,
+#                     keyring items, settings) before installing. Doesn't ask.
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -31,6 +35,7 @@ OFFLINE="false"
 RECONFIGURE=0
 FEATURES=""
 INSTALL=0
+FRESH=0
 
 usage() {
     sed -n '3,/^$/s/^# \?//p' "$0"
@@ -45,7 +50,7 @@ die() {
 # Parse command
 COMMAND="${1:-dev}"
 case "$COMMAND" in
-    dev|release|test|pot|update-po|cargo-src|clean|help)
+    dev|release|test|pot|cargo-src|clean|help)
         shift || true
         ;;
     -h|--help)
@@ -87,6 +92,11 @@ while [[ $# -gt 0 ]]; do
             INSTALL=1
             shift
             ;;
+        --fresh-install)
+            FRESH=1
+            INSTALL=1
+            shift
+            ;;
         -h|--help)
             usage
             ;;
@@ -100,8 +110,48 @@ BUILD_PATH="$REPO_ROOT/$BUILD_DIR"
 
 # Validate --install usage
 if [[ "$INSTALL" -eq 1 && "$COMMAND" != "dev" && "$COMMAND" != "release" ]]; then
-    die "--install is only valid with 'dev' or 'release' commands"
+    die "--install and --fresh-install are only valid with 'dev' or 'release' commands"
 fi
+
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+FRESH_PATHS=(
+    "$DATA_HOME/riff/soloist"
+    "$DATA_HOME/riff/now_playing_textures"
+    "$CACHE_HOME/riff"
+)
+FRESH_KEYRING_ATTRS=("riff" "riff-session" "riff-player-key")
+SETTINGS_PATH="/dev/diegovsky/Riff/"
+
+wipe_user_data() {
+    echo "==> Removing Riff's user data..."
+    local path attr var
+    for path in "${FRESH_PATHS[@]}"; do
+        if [[ -e "$path" ]]; then
+            rm -rf -- "$path"
+            echo "  removed $path"
+        fi
+    done
+    if command -v secret-tool >/dev/null 2>&1; then
+        for attr in "${FRESH_KEYRING_ATTRS[@]}"; do
+            secret-tool clear "$attr" yes 2>/dev/null || true
+        done
+        echo "  cleared keyring items"
+    else
+        echo "Warning: secret-tool isn't installed; keyring items were left." >&2
+    fi
+    if command -v dconf >/dev/null 2>&1; then
+        dconf reset -f "$SETTINGS_PATH"
+        echo "  reset settings"
+    else
+        echo "Warning: dconf isn't installed; settings were left." >&2
+    fi
+    for var in RIFF_SOLOIST_API_KEY RIFF_SOLOIST_BIN; do
+        if [[ -n "${!var:-}" ]]; then
+            echo "Warning: $var is set; Riff will use it, so setup won't be fully fresh." >&2
+        fi
+    done
+}
 
 setup_build() {
     local buildtype="$1"
@@ -134,6 +184,9 @@ do_build() {
 }
 
 do_install() {
+    if [[ "$FRESH" -eq 1 ]]; then
+        wipe_user_data
+    fi
     echo "==> Installing to $PREFIX..."
     ninja install -C "$BUILD_PATH"
 }

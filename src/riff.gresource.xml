@@ -4,10 +4,19 @@
     <file>window.ui</file>
     <file alias="dev_tools.ui">app/dev_tools/dev_tools.ui</file>
     <file>app.css</file>
+    <!-- the spinning logo's layers (see spinning_logo.rs) -->
+    <file compressed="true" preprocess="xml-stripblanks" alias="logo/ring-shadow.svg">../data/images/logo/ring-shadow.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="logo/ring-shadow-light.svg">../data/images/logo/ring-shadow-light.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="logo/ring.svg">../data/images/logo/ring.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="logo/ring-light.svg">../data/images/logo/ring-light.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="logo/middle.svg">../data/images/logo/middle.svg</file>
     <file>debug.css</file>
     <file>skeleton_override.css</file>
     <!-- login -->
     <file alias="components/login.ui">app/components/pages/login/login.ui</file>
+    <!-- How to pick this computer in the other app, from a computer or a phone, on the pairing step -->
+    <file alias="guide/desktop-soloist-setup.webm">../data/guide/desktop-soloist-setup.webm</file>
+    <file alias="guide/mobile-soloist-setup.webm">../data/guide/mobile-soloist-setup.webm</file>
     <!-- settings -->
     <file alias="components/settings.ui">app/components/pages/settings/settings.ui</file>
     <file alias="components/equalizer.ui">app/components/pages/settings/equalizer.ui</file>
@@ -88,6 +97,7 @@
     <file compressed="true" preprocess="xml-stripblanks" alias="avatar-default-symbolic.svg">../data/hicolor/symbolic/actions/avatar-default-symbolic.svg</file>
     <file compressed="true" preprocess="xml-stripblanks" alias="computer-symbolic.svg">../data/hicolor/symbolic/actions/computer-symbolic.svg</file>
     <file compressed="true" preprocess="xml-stripblanks" alias="emote-love-symbolic.svg">../data/hicolor/symbolic/actions/emote-love-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks" alias="help-about-symbolic.svg">../data/hicolor/symbolic/actions/help-about-symbolic.svg</file>
     <file compressed="true" preprocess="xml-stripblanks" alias="media-optical-cd-audio-symbolic.svg">../data/hicolor/symbolic/actions/media-optical-cd-audio-symbolic.svg</file>
     <file compressed="true" preprocess="xml-stripblanks" alias="media-playlist-consecutive-symbolic.svg">../data/hicolor/symbolic/actions/media-playlist-consecutive-symbolic.svg</file>
     <file compressed="true" preprocess="xml-stripblanks" alias="media-playlist-repeat-song-symbolic.svg">../data/hicolor/symbolic/actions/media-playlist-repeat-song-symbolic.svg</file>

@@ -5004,6 +5004,7 @@ components:
           description: A Context Object. Can be `null`.
         timestamp:
           type: integer
+          format: int64
           description: Unix Millisecond Timestamp when playback state was last changed (play, pause, skip, scrub, new song, etc.).
         progress_ms:
           type: integer

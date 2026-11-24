@@ -9,20 +9,18 @@ use crate::app::components::{
     EmbeddedCardList, EventListener, HeaderBarModel, PageHeader, SortOrder, TrackList,
     TrackListModel,
 };
+use crate::app::state::LibraryFields;
 use crate::app::{AppEvent, Dispatcher};
-use riff_config::feature_flags::{is_enabled, FeatureFlag};
+use riff_config::feature_flag::{is_enabled, FeatureFlag};
 
 const QUEUE: &str = "queue";
 
-/// A generic details page component that wires all standard behavior
-/// from a `PageModel` implementation automatically.
 pub struct DetailsPageComponent<M> {
     model: Rc<M>,
     page: DetailsPage,
     content: gtk::Box,
     children: Vec<Box<dyn EventListener>>,
     header: PageHeader,
-    // Header menu entries added by the page
     page_menu: Rc<RefCell<Vec<(String, String, Rc<dyn Fn()>)>>>,
 }
 
@@ -70,10 +68,6 @@ impl<M: PinnedPageModel + 'static> DetailsPageComponent<M> {
         c
     }
 
-    pub fn header(&self) -> &PageHeader {
-        &self.header
-    }
-
     /// For content with its own component, like a `QueueList`.
     pub fn append_content(&self, widget: &impl IsA<gtk::Widget>) {
         self.content.append(widget);
@@ -91,8 +85,6 @@ impl<M: PinnedPageModel + 'static> DetailsPageComponent<M> {
         self.content.append(&section);
 
         let track_list = TrackList::new(listview.clone(), self.model.clone());
-        // Requires an ancestor ScrolledWindow, provided by DetailsPage; must
-        // run after the listview above is appended into the page's content.
         track_list.connect_scrolling();
         self.children.push(Box::new(track_list));
         listview
@@ -150,8 +142,6 @@ impl<M: PinnedPageModel + 'static> DetailsPageComponent<M> {
         section.set_button(&button);
         let button_slot = section.button_slot().clone();
 
-        // Weak, so the handler on the page's scroll adjustment doesn't keep
-        // the button and its slots alive.
         self.page.connect_scrolled_past(
             section.header_row().upcast_ref(),
             clone!(
@@ -163,8 +153,6 @@ impl<M: PinnedPageModel + 'static> DetailsPageComponent<M> {
                 self.header,
                 move |past| {
                     if past {
-                        // Keep the row's height once the button leaves it, so
-                        // the content below doesn't shift.
                         button_slot.set_height_request(button_slot.height());
                         if button.parent().as_ref() == Some(button_slot.upcast_ref()) {
                             button_slot.remove(&button);
@@ -302,7 +290,6 @@ impl<M: PinnedPageModel + 'static> DetailsPageComponent<M> {
             set_pin_button_state(&*self.model, self.page.header());
         }
 
-        // Initial state
         if let Some(icon) = self.model.default_icon() {
             self.page.header().set_default_icon(icon);
         }
@@ -330,7 +317,6 @@ impl<M: PinnedPageModel + 'static> DetailsPageComponent<M> {
             self.header.set_subtitle(&subtitle);
         }
 
-        // Set subtitle links if the model provides them
         let links = self.model.get_subtitle_links();
         if !links.is_empty() {
             let artists: Vec<(String, String)> = links
@@ -372,10 +358,9 @@ impl<M: PinnedPageModel + 'static> DetailsPageComponent<M> {
 
     /// Standard event handling. Returns true if the event was consumed.
     pub fn handle_event(&self, event: &AppEvent) -> bool {
+        self.model.apply_event(event);
         match event {
-            AppEvent::BrowserEvent(crate::app::BrowserEvent::SongPlaybackRequested(id))
-                if self.model.has_play_button() =>
-            {
+            AppEvent::SongPlaybackRequested(id) if self.model.has_play_button() => {
                 self.model.start_play(id);
                 return true;
             }
@@ -385,7 +370,6 @@ impl<M: PinnedPageModel + 'static> DetailsPageComponent<M> {
         if self.model.should_refresh_details(event) {
             self.refresh_details();
             if self.model.has_play_button() {
-                // Not when paused or stopped
                 self.page
                     .header()
                     .set_playing(self.model.source_is_playing() && self.model.is_playing());
@@ -407,10 +391,7 @@ impl<M: PinnedPageModel + 'static> DetailsPageComponent<M> {
             }
             return true;
         }
-        if matches!(
-            event,
-            AppEvent::BrowserEvent(crate::app::BrowserEvent::PinnedPlaylistsUpdated)
-        ) {
+        if event.library_changed(LibraryFields::PINS) {
             if self.model.supports_pin_button() {
                 set_pin_button_state(&*self.model, self.page.header());
             }
@@ -439,7 +420,6 @@ impl<M: PinnedPageModel + 'static> Component for DetailsPageComponent<M> {
 
 impl<M> Drop for DetailsPageComponent<M> {
     fn drop(&mut self) {
-        // Unregister from the shared header so a re-push re-registers cleanly.
         self.header.remove();
     }
 }
@@ -451,8 +431,6 @@ impl<M: PinnedPageModel + 'static> EventListener for DetailsPageComponent<M> {
     }
 }
 
-/// Generates the `Component` impl for a page struct that wraps `DetailsPageComponent`.
-/// Expects the struct to have a field named `component`.
 #[macro_export]
 macro_rules! impl_details_component {
     ($ty:ty) => {

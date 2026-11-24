@@ -6,8 +6,8 @@ use super::{NavigationPanelDestination, NavigationPanelModel};
 use crate::app::components::labels;
 use crate::app::components::utils::confirm_delete_playlist;
 use crate::app::models::PlaylistSummary;
-use crate::settings;
-use riff_config::feature_flags::{is_enabled, FeatureFlag};
+use crate::app::state::PinKind;
+use riff_config::feature_flag::{is_enabled, FeatureFlag};
 
 fn make_play_action(id: &str, model: &Rc<NavigationPanelModel>) -> gio::SimpleAction {
     let action = gio::SimpleAction::new("play", None);
@@ -112,7 +112,7 @@ pub fn build_playlist_actions(id: &str, model: &Rc<NavigationPanelModel>) -> Sim
 
 /// Laid out like the track list's menu: the library, pin and queue entries
 /// share a section, in that order, and the link comes last.
-pub fn build_playlist_menu(is_owned: bool, id: &str, user_id: Option<&str>) -> gio::Menu {
+pub fn build_playlist_menu(is_owned: bool, is_pinned: bool) -> gio::Menu {
     let playback_section = gio::Menu::new();
     playback_section.append(Some(&*labels::PLAY), Some("playlist.play"));
     playback_section.append(Some(&*labels::SHUFFLE), Some("playlist.shuffle"));
@@ -125,9 +125,6 @@ pub fn build_playlist_menu(is_owned: bool, id: &str, user_id: Option<&str>) -> g
     };
     playlist_section.append(Some(remove_label), Some("playlist.unfollow"));
     if is_enabled(FeatureFlag::PinnedObjects) {
-        let is_pinned = user_id.is_some_and(|user_id| {
-            settings::is_object_pinned(user_id, id, settings::PinnedKind::Playlist)
-        });
         let pin_label = if is_pinned {
             &*labels::UNPIN_FROM_SIDEBAR
         } else {
@@ -157,13 +154,12 @@ pub fn build_context_menu(
         NavigationPanelDestination::Playlist(PlaylistSummary { id, .. }) => {
             let actions = build_playlist_actions(id, model);
             let is_owned = model.is_playlist_owned(id);
-            let user_id = model.logged_user_id();
-            let menu = build_playlist_menu(is_owned, id, user_id.as_deref());
+            let menu = build_playlist_menu(is_owned, model.is_pinned(PinKind::Playlist, id));
             return Some(("playlist", actions, menu));
         }
-        NavigationPanelDestination::Album { id, .. } => (settings::PinnedKind::Album, id),
-        NavigationPanelDestination::Artist { id, .. } => (settings::PinnedKind::Artist, id),
-        NavigationPanelDestination::Track { id, .. } => (settings::PinnedKind::Track, id),
+        NavigationPanelDestination::Album { id, .. } => (PinKind::Album, id),
+        NavigationPanelDestination::Artist { id, .. } => (PinKind::Artist, id),
+        NavigationPanelDestination::Track { id, .. } => (PinKind::Track, id),
         _ => return None,
     };
     let actions = build_pinned_actions(kind, id, model);
@@ -179,14 +175,14 @@ fn action(name: &str, activate: impl Fn() + 'static) -> gio::SimpleAction {
 
 /// Actions for a pinned album, artist or track row, under the `pinned` prefix.
 pub fn build_pinned_actions(
-    kind: settings::PinnedKind,
+    kind: PinKind,
     id: &str,
     model: &Rc<NavigationPanelModel>,
 ) -> SimpleActionGroup {
     let group = SimpleActionGroup::new();
     let play = move |model: &NavigationPanelModel, id: String, shuffle: bool| match kind {
-        settings::PinnedKind::Album => model.play_album(id, shuffle),
-        settings::PinnedKind::Artist => model.play_artist(id, shuffle),
+        PinKind::Album => model.play_album(id, shuffle),
+        PinKind::Artist => model.play_artist(id, shuffle),
         _ => model.play_track(id),
     };
     for (name, shuffle) in [("play", false), ("shuffle", true)] {
@@ -208,7 +204,7 @@ pub fn build_pinned_actions(
             #[weak]
             model,
             move || {
-                if kind == settings::PinnedKind::Playlist {
+                if kind == PinKind::Playlist {
                     confirm_unfollow_playlist(&model, remove_id.clone());
                 } else {
                     model.remove_from_library(kind, remove_id.clone());
@@ -228,10 +224,10 @@ pub fn build_pinned_actions(
     ));
 
     let path = match kind {
-        settings::PinnedKind::Playlist => "playlist",
-        settings::PinnedKind::Album => "album",
-        settings::PinnedKind::Artist => "artist",
-        settings::PinnedKind::Track => "track",
+        PinKind::Playlist => "playlist",
+        PinKind::Album => "album",
+        PinKind::Artist => "artist",
+        PinKind::Track => "track",
     };
     let link = format!("https://open.spotify.com/{path}/{id}");
     group.add_action(&action("copy_link", move || {
@@ -242,19 +238,18 @@ pub fn build_pinned_actions(
 
 /// Menu for a pinned album, artist or track row, laid out like the playlist
 /// menu. The remove entry is only shown for items in the user's library.
-pub fn build_pinned_menu(kind: settings::PinnedKind, in_library: bool) -> gio::Menu {
+pub fn build_pinned_menu(kind: PinKind, in_library: bool) -> gio::Menu {
     let playback_section = gio::Menu::new();
     playback_section.append(Some(&*labels::PLAY), Some("pinned.play"));
-    // Shuffling a single track does nothing useful.
-    if kind != settings::PinnedKind::Track {
+    if kind != PinKind::Track {
         playback_section.append(Some(&*labels::SHUFFLE), Some("pinned.shuffle"));
     }
 
     let item_section = gio::Menu::new();
     if in_library {
         let label = match kind {
-            settings::PinnedKind::Album => &*labels::UNLIKE_ALBUM,
-            settings::PinnedKind::Artist => &*labels::UNLIKE_ARTIST,
+            PinKind::Album => &*labels::UNLIKE_ALBUM,
+            PinKind::Artist => &*labels::UNLIKE_ARTIST,
             _ => &*labels::UNLIKE,
         };
         item_section.append(Some(label), Some("pinned.remove"));
@@ -295,7 +290,7 @@ mod tests {
 
     #[test]
     fn pinned_album_menu_mirrors_playlist_menu() {
-        let menu = build_pinned_menu(settings::PinnedKind::Album, true);
+        let menu = build_pinned_menu(PinKind::Album, true);
         assert_eq!(
             menu_actions(&menu),
             vec![
@@ -308,13 +303,13 @@ mod tests {
 
     #[test]
     fn pinned_track_menu_has_no_shuffle() {
-        let menu = build_pinned_menu(settings::PinnedKind::Track, true);
+        let menu = build_pinned_menu(PinKind::Track, true);
         assert_eq!(menu_actions(&menu)[0], vec!["pinned.play"]);
     }
 
     #[test]
     fn pinned_menu_omits_remove_outside_library() {
-        let menu = build_pinned_menu(settings::PinnedKind::Artist, false);
+        let menu = build_pinned_menu(PinKind::Artist, false);
         assert!(!menu_actions(&menu)
             .concat()
             .contains(&"pinned.remove".to_string()));
