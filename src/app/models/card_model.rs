@@ -31,6 +31,10 @@ impl CardModel {
             .property("subtitle", subtitle);
         if let Some(rd) = release_date {
             builder = builder.property("release-date", rd);
+
+            if let Some(year_str) = rd.split('-').next() {
+                builder = builder.property("release-year", year_str);
+            }
         }
         if let Some(pop) = popularity {
             builder = builder.property("popularity", pop);
@@ -89,6 +93,8 @@ mod imp {
         subtitle: RefCell<String>,
         #[property(get, set, name = "release-date")]
         release_date: RefCell<String>,
+        #[property(get, set, name = "release-year")]
+        release_year: RefCell<String>,
         #[property(get, set)]
         popularity: Cell<u32>,
         #[property(get, set, name = "insertion-position")]
@@ -188,6 +194,18 @@ mod tests {
             .property("release-date", "2023-05-01")
             .build();
         assert_eq!(card.release_date(), "2023-05-01");
+    }
+
+    #[test]
+    fn test_release_year() {
+        let card: CardModel = glib::Object::builder()
+            .property("id", "id")
+            .property("title", "T")
+            .property("subtitle", "S")
+            .property("release-date", "2023-05-01")
+            .property("release-year", "2023")
+            .build();
+        assert_eq!(card.release_year(), "2023");
     }
 
     #[test]
