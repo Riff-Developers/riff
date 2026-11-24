@@ -2,6 +2,8 @@
 mod settings;
 mod settings_model;
 
+mod choice_row;
+
 mod lock_button;
 
 mod equalizer;

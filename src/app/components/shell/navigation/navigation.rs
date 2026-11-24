@@ -7,15 +7,13 @@ use glib::prelude::ToVariant;
 use glib::SignalHandlerId;
 
 use crate::app::components::{EventListener, ListenerComponent};
-use crate::app::state::{Direction, Route, Transition};
-use crate::app::{AppEvent, BrowserEvent};
+use crate::app::state::{Direction, NavigationFields, Route, Transition};
+use crate::app::AppEvent;
 
 use super::page_stack::{hide_pages_not_showing, show_page};
 use super::{factory::ScreenFactory, home::HomePane, NavigationModel};
 
-/// Horizontal touchpad travel, in pixels, that counts as a back/forward swipe.
 const TOUCHPAD_SWIPE_DISTANCE: f64 = 200.0;
-/// Horizontal touch velocity, in pixels per second, that counts as a swipe.
 const TOUCH_SWIPE_VELOCITY: f64 = 1000.0;
 
 pub struct Navigation {
@@ -43,7 +41,6 @@ impl Navigation {
             None,
             &split_view.shows_sidebar().to_variant(),
         );
-        // The user hid it beside the content panel
         let desktop_hidden = Rc::new(Cell::new(false));
         show_navigation_panel_action.connect_change_state(clone!(
             #[weak]
@@ -89,7 +86,6 @@ impl Navigation {
             }
         ));
 
-        // Hide scrollbars on the stack's pages while the slide transition is running
         content_stack.connect_transition_running_notify(|stack| {
             if stack.is_transition_running() {
                 stack.add_css_class("transitioning");
@@ -128,7 +124,6 @@ impl Navigation {
         }
     }
 
-    // Only collapsed: showing it beside the content panel would undo a hide
     fn show_navigation(&self) {
         if self.split_view.is_collapsed() {
             self.split_view.set_show_sidebar(true);
@@ -216,26 +211,25 @@ impl Navigation {
 
 impl EventListener for Navigation {
     fn on_event(&mut self, event: &AppEvent) {
-        match event {
-            AppEvent::Started => {
-                self.show_screen(&Route::Home(Default::default()));
-            }
-            AppEvent::BrowserEvent(BrowserEvent::NavigationChanged(transition)) => {
-                self.go(transition);
-            }
-            AppEvent::BrowserEvent(BrowserEvent::NavigationHidden(false)) => {
-                self.show_navigation();
-            }
-            _ => {}
-        };
+        if let AppEvent::Started = event {
+            self.show_screen(&Route::Home(Default::default()));
+        }
+        if let Some(transition) = event.transition() {
+            self.go(transition);
+        }
+        if event
+            .navigation()
+            .is_some_and(|n| n.changed.contains(NavigationFields::HIDDEN) && !n.hidden)
+        {
+            self.show_navigation();
+        }
         for (_, screen) in self.screens.iter_mut() {
             screen.on_event(event);
         }
-        // After the screens handled it, so the home pane shows the right page
-        if let AppEvent::BrowserEvent(BrowserEvent::NavigationChanged(Transition {
+        if let Some(Transition {
             restore_scroll: Some(scroll),
             ..
-        })) = event
+        }) = event.transition()
         {
             self.restore_scroll(*scroll);
         }
@@ -335,7 +329,6 @@ fn connect_back_forward_input(
             if vx.abs() < TOUCH_SWIPE_VELOCITY || vx.abs() < 2.0 * vy.abs() {
                 return;
             }
-            // Content follows the finger: dragging it right reveals what came before
             if vx > 0.0 {
                 model.go_back();
             } else {
@@ -345,7 +338,6 @@ fn connect_back_forward_input(
     ));
     content_stack.add_controller(swipe);
 
-    // Touchpad two-finger swipes arrive as horizontal scrolling in pixels
     let travelled = Rc::new(Cell::new(0.0));
     let fired = Rc::new(Cell::new(false));
     let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::HORIZONTAL);

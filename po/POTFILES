@@ -1,4 +1,6 @@
-# grep gettext src/**/*.rs | cut -d: -f1 | uniq
+# grep -rl gettext src crates --include=*.rs | sort
+crates/riff-api/src/defaults.rs
+crates/riff-api/src/models.rs
 src/app/components/labels.rs
 src/app/components/mod.rs
 src/app/components/pages/details_artist/widget.rs
@@ -13,35 +15,34 @@ src/app/components/pages/saved_artists/model.rs
 src/app/components/pages/saved_playlists/model.rs
 src/app/components/pages/saved_tracks/model.rs
 src/app/components/pages/search/search.rs
+src/app/components/pages/settings/choice_row.rs
 src/app/components/pages/settings/settings.rs
 src/app/components/shell/clipboard_import/mod.rs
 src/app/components/shell/device_selector/widget.rs
 src/app/components/shell/navigation/factory.rs
+src/app/components/shell/navigation_panel/model.rs
+src/app/components/shell/navigation_panel/navigation_panel.rs
+src/app/components/shell/navigation_panel/navigation_panel_item.rs
 src/app/components/shell/notification/mod.rs
 src/app/components/shell/playback/playback_controls.rs
 src/app/components/shell/playback/playback_info.rs
-src/app/components/shell/navigation_panel/model.rs
-src/app/components/shell/navigation_panel/navigation_panel_item.rs
-src/app/components/shell/navigation_panel/navigation_panel.rs
 src/app/components/shell/window/close_dialog.rs
 src/app/components/shell/window/mod.rs
 src/app/components/widgets/details_page/header.rs
 src/app/components/widgets/details_page/model.rs
-src/app/components/widgets/track_list/track_row.rs
-src/app/components/widgets/selection/component.rs
 src/app/components/widgets/queue_list/model.rs
+src/app/components/widgets/selection/component.rs
 src/app/components/widgets/track_list/track_list.rs
+src/app/components/widgets/track_list/track_row.rs
 src/app/models/card_enums.rs
-src/connect/player.rs
+src/app/player_events.rs
 src/inhibitor.rs
 src/main.rs
-src/player/mod.rs
-crates/riff-api/src/defaults.rs
-crates/riff-api/src/models.rs
 
 # find src -name "*.blp" -print
 src/app/components/pages/details_album/release_details.blp
 src/app/components/pages/login/login.blp
+src/app/components/pages/login/login.rs
 src/app/components/pages/queue/queue_page.blp
 src/app/components/pages/search/search.blp
 src/app/components/pages/settings/equalizer.blp

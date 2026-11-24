@@ -69,24 +69,9 @@ template $SettingsWindow : Adw.PreferencesDialog {
 
         subtitle: _("Automatically skip tracks marked as explicit");
       }
-
-      Adw.SpinRow shuffle_separation {
-        /* Translators: Title for the shuffle separation preference */
-
-        title: _("Shuffle Separation");
-
-        // The subtitle is set from the code: it includes the value
-        adjustment: Adjustment {
-          lower: 1;
-          upper: 10;
-          value: 2;
-          step-increment: 1;
-          page-increment: 1;
-        };
-      }
     }
 
-    Adw.PreferencesGroup {
+    Adw.PreferencesGroup audio_group {
       /* Translators: Header for a group of preference items regarding audio */
 
       title: _("Audio");
@@ -279,12 +264,12 @@ template $SettingsWindow : Adw.PreferencesDialog {
 
     $PitchWidget pitch {}
 
-    Adw.PreferencesGroup {
+    Adw.PreferencesGroup network_group {
       /* Translators: Header for a group of preference items regarding network */
 
       title: _("Network");
 
-      Adw.ActionRow {
+      Adw.ActionRow ap_port_row {
         /* Translators: Title for an item in preferences */
 
         title: _("Access Point Port");

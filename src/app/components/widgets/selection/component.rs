@@ -7,10 +7,11 @@ use crate::app::components::{
     add_tracks_to_playlist, dispatch_api_call_many, Component, EventListener,
 };
 use crate::app::models::{PlaylistSummary, Track};
-use crate::app::state::{
-    LoginEvent, SelectionAction, SelectionContext, SelectionEvent, SelectionState,
-};
-use crate::app::{AppAction, AppEvent, AppModel, BrowserAction, Dispatcher};
+use crate::app::state::Action;
+use crate::app::state::ItemId;
+use crate::app::state::{LibraryFields, SelectionAction, SelectionContext, SelectionState};
+use crate::app::{AppAction, AppEvent, AppModel, Dispatcher};
+use riff_core::library;
 
 use super::widget::{SelectionToolState, SelectionToolbarWidget};
 
@@ -28,11 +29,13 @@ impl SelectionToolbarModel {
     }
 
     pub fn queue_selection(&self) {
-        self.dispatcher.dispatch(AppAction::QueueSelection);
+        self.dispatcher
+            .dispatch(AppAction::Core(Action::QueueSelection));
     }
 
     fn dequeue_selection(&self) {
-        self.dispatcher.dispatch(AppAction::DequeueSelection);
+        self.dispatcher
+            .dispatch(AppAction::Core(Action::DequeueSelection));
     }
 
     pub fn remove_selection(&self) {
@@ -52,9 +55,9 @@ impl SelectionToolbarModel {
             .map(|s| s.rri.id.clone())
             .collect();
         dispatch_api_call_many(&self.dispatcher, move || async move {
-            api.save_tracks(ids).await?;
+            library::set_saved(&api, ItemId::Tracks(ids), true).await?;
             Ok(vec![
-                AppAction::SaveSelection,
+                AppAction::Core(Action::SaveSelection),
                 AppAction::ShowNotification(gettext("Tracks saved!")),
             ])
         })
@@ -68,8 +71,8 @@ impl SelectionToolbarModel {
             .map(|s| s.rri.id.clone())
             .collect();
         dispatch_api_call_many(&self.dispatcher, move || async move {
-            api.remove_tracks(ids).await?;
-            Ok(vec![AppAction::UnsaveSelection])
+            library::set_saved(&api, ItemId::Tracks(ids), false).await?;
+            Ok(vec![AppAction::Core(Action::UnsaveSelection)])
         })
     }
 
@@ -82,7 +85,7 @@ impl SelectionToolbarModel {
     }
 
     fn user_playlists(&self) -> Vec<PlaylistSummary> {
-        self.app_model.get_state().logged_user.owned_playlists()
+        self.app_model.get_state().owned_playlists()
     }
 
     fn add_to_playlist(&self, id: &str) {
@@ -105,11 +108,8 @@ impl SelectionToolbarModel {
             .filter_map(|s| s.rri.uri.clone())
             .collect();
         dispatch_api_call_many(&self.dispatcher, move || async move {
-            api.remove_from_playlist(&id, uris.clone()).await?;
-            Ok(vec![
-                BrowserAction::RemoveTracksFromPlaylist(id, uris).into(),
-                SelectionAction::Clear.into(),
-            ])
+            let removed = library::remove_from_playlist(&api, id, uris.clone()).await?;
+            Ok(vec![removed.into(), SelectionAction::Clear.into()])
         })
     }
 }
@@ -147,7 +147,6 @@ impl SelectionToolbar {
         {
             SelectionContext::Default => (shown, shown, hidden, hidden, shown),
             SelectionContext::SavedTracks => (shown, shown, shown, hidden, hidden),
-            SelectionContext::ReadOnlyQueue => (hidden, hidden, hidden, hidden, shown),
             SelectionContext::Queue => (hidden, hidden, shown, hidden, shown),
             SelectionContext::Playlist => (shown, hidden, hidden, hidden, shown),
             SelectionContext::EditablePlaylist(_) => (shown, hidden, hidden, shown, shown),
@@ -168,26 +167,22 @@ impl Component for SelectionToolbar {
 
 impl EventListener for SelectionToolbar {
     fn on_event(&mut self, event: &AppEvent) {
-        match event {
-            AppEvent::SelectionEvent(SelectionEvent::SelectionModeChanged(active)) => {
-                self.widget.set_visible(*active);
-                self.update_active_tools();
+        if let Some(selection) = event.selection() {
+            if selection.mode_changed() {
+                self.widget.set_visible(selection.active);
             }
-            AppEvent::SelectionEvent(SelectionEvent::SelectionChanged) => {
-                self.update_active_tools();
-            }
-            AppEvent::LoginEvent(LoginEvent::UserPlaylistsLoaded) => {
-                let model = &self.model;
-                self.widget.connect_playlists(
-                    &model.user_playlists(),
-                    clone!(
-                        #[weak]
-                        model,
-                        move |s| model.add_to_playlist(s)
-                    ),
-                );
-            }
-            _ => {}
+            self.update_active_tools();
+        }
+        if event.library_changed(LibraryFields::PLAYLISTS) {
+            let model = &self.model;
+            self.widget.connect_playlists(
+                &model.user_playlists(),
+                clone!(
+                    #[weak]
+                    model,
+                    move |s| model.add_to_playlist(s)
+                ),
+            );
         }
     }
 }

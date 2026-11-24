@@ -18,17 +18,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 mod app;
 mod config;
-mod connect;
-mod dbus;
 mod inhibitor;
-mod player;
 mod settings;
 
 use crate::app::components::expose_custom_widgets;
 use crate::app::dispatch::DispatchLoop;
-use crate::app::{state::PlaybackAction, App, AppAction, BrowserAction};
+use crate::app::state::NavigationAction;
+use crate::app::{state::PlaybackAction, App, AppAction};
 
-// Steps of the seek and volume shortcuts
 const SEEK_STEP_MS: i32 = 5_000;
 const VOLUME_STEP: f64 = 0.05;
 #[cfg(target_env = "gnu")]
@@ -40,19 +37,16 @@ fn main() {
         libc::mallopt(libc::M_ARENA_MAX, MALLOC_ARENAS);
     }
 
+    riff_playback::player::set_cache_root(glib::user_cache_dir().join("riff").join("librespot"));
     let settings = settings::RiffSettings::new_from_gsettings().unwrap_or_default();
     setup_gtk(&settings);
 
-    // Looks like there's a side effect to declaring widgets that allows them to be referenced them in ui/blueprint files
-    // so here goes!
     expose_custom_widgets();
 
     let gtk_app = gtk::Application::new(Some(config::APPID), ApplicationFlags::HANDLES_OPEN);
     let builder = gtk::Builder::from_resource("/dev/diegovsky/Riff/window.ui");
     let window: libadwaita::ApplicationWindow = builder.object("window").unwrap();
 
-    // In debug mode, the app id is different (see meson config) so we fix the resource path (and add a distinctive style)
-    // Having a different app id allows running both the stable and development version at the same time
     if cfg!(debug_assertions) {
         window.add_css_class("devel");
         gtk_app.set_resource_base_path(Some("/dev/diegovsky/Riff"));
@@ -62,26 +56,21 @@ fn main() {
     let dispatch_loop = DispatchLoop::new();
     let sender = dispatch_loop.make_dispatcher();
 
-    // Couple of actions used with shortcuts
     register_actions(&gtk_app, sender.clone());
-    // Displayed as the accelerator hint next to "Preferences" in the main menu.
     gtk_app.set_accels_for_action("win.preferences", &["<Ctrl>comma"]);
-    // Displayed as the accelerator hint next to "Keyboard Shortcuts" in the main menu.
     gtk_app.set_accels_for_action("win.show-shortcuts", &["<Ctrl>question"]);
     app::components::setup_about(builder.object::<libadwaita::AboutDialog>("about").unwrap());
     setup_arrow_shortcuts(&window, builder.object("arrow_shortcuts").unwrap());
 
-    // Main app logic is hooked up here
     let app = App::new(settings, builder, sender.clone());
     context.spawn_local(app.attach(dispatch_loop));
 
     let sender_clone = sender.clone();
     gtk_app.connect_activate(move |gtk_app| {
         debug!("activate");
-        if let Some(existing_window) = gtk_app.active_window() {
-            existing_window.present();
+        if gtk_app.active_window().is_some() {
+            sender_clone.unbounded_send(AppAction::Raise).unwrap();
         } else {
-            // Only send the Start action if we've just created the window
             window.set_application(Some(gtk_app));
             gtk_app.add_window(&window);
             sender_clone.unbounded_send(AppAction::Start).unwrap();
@@ -91,7 +80,6 @@ fn main() {
     gtk_app.connect_open(move |gtk_app, targets, _| {
         gtk_app.activate();
 
-        // There should only be one target because %u is used in desktop file
         let Some(target) = targets.first() else {
             return;
         };
@@ -128,16 +116,17 @@ fn relaunch() {
 }
 
 fn setup_gtk(settings: &settings::RiffSettings) {
-    // Setup logging
-    env_logger::init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default()
+            .default_filter_or("warn,riff_playback=info,riff_core::remote=info"),
+    )
+    .init();
 
-    // Setup translations
     textdomain("riff")
         .and_then(|_| bindtextdomain("riff", config::LOCALEDIR))
         .and_then(|_| bind_textdomain_codeset("riff", "UTF-8"))
         .expect("Could not setup localization");
 
-    // Setup Gtk, Adwaita...
     gtk::init().unwrap_or_else(|_| panic!("Failed to initialize GTK"));
     libadwaita::init().unwrap_or_else(|_| panic!("Failed to initialize libadwaita"));
 
@@ -282,29 +271,28 @@ fn register_actions(app: &gtk::Application, sender: UnboundedSender<AppAction>) 
         ("nav_playlists", HomePage::SavedPlaylists),
         ("nav_tracks", HomePage::SavedTracks),
     ] {
-        // Same as picking the page in the navigation panel
         app.add_action(&make_action(
             name,
-            BrowserAction::Navigate(Route::Home(page)).into(),
+            NavigationAction::Go(Route::Home(page)).into(),
             sender.clone(),
         ));
     }
 
     app.add_action(&make_action(
         "nav_back",
-        AppAction::BrowserAction(BrowserAction::NavigationBack),
+        AppAction::from(NavigationAction::Back),
         sender.clone(),
     ));
 
     app.add_action(&make_action(
         "nav_forward",
-        AppAction::BrowserAction(BrowserAction::NavigationForward),
+        AppAction::from(NavigationAction::Forward),
         sender.clone(),
     ));
 
     app.add_action(&make_action(
         "search",
-        AppAction::BrowserAction(BrowserAction::Navigate(Route::Search)),
+        AppAction::from(NavigationAction::Go(Route::Search)),
         sender.clone(),
     ));
 }

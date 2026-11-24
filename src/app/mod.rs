@@ -1,11 +1,14 @@
-#[cfg(debug_assertions)]
-use crate::player::Command;
+use crate::app::state::Action;
 use crate::settings::{RiffSettings, StateTracker};
 use futures::channel::mpsc::UnboundedSender;
-use gio::prelude::SettingsExt;
 use glib::object::Cast;
 use riff_auth::{SessionTokens, TokenStore};
-use riff_config::feature_flags::FeatureFlag;
+use riff_config::setting::megabytes;
+use riff_config::{Setting, SettingsChanged, SettingsStore};
+use riff_core::schedule::RunLog;
+#[cfg(debug_assertions)]
+use riff_playback::player::Command;
+use riff_playback::player::{ThisComputer, ThisDevice};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -24,34 +27,29 @@ mod list_store;
 pub use list_store::*;
 
 pub mod state;
-pub use state::{
-    AppAction, AppEvent, AppModel, AppState, BrowserAction, BrowserEvent, PaginationTarget,
-    ProvidesApi,
-};
+pub use state::{AppAction, AppEvent, AppModel, AppState, ProvidesApi};
 
-pub mod load;
-
-pub mod playlist_actions;
+mod mpris;
+mod pin_store;
+pub mod player_events;
+mod remote_playback;
+use pin_store::PinStore;
 
 #[cfg(debug_assertions)]
 mod dev_tools;
 
-// Where all the app logic happens
 pub struct App {
     settings: RiffSettings,
-    // The builder instance used to properly configure all the widgets created at startup
     builder: gtk::Builder,
-    // All the "components" that will be notified of things happening throughout the app
     components: Vec<Box<dyn EventListener>>,
-    // Holds the app state
     model: Rc<AppModel>,
-    // Allows sending actions that are handled by the model above
     sender: UnboundedSender<AppAction>,
+    this_computer: ThisComputer,
     // Sends commands to the librespot player. Only the dev tools menu uses it,
     // so it is compiled out of release builds entirely.
     #[cfg(debug_assertions)]
     player_command_sender: UnboundedSender<Command>,
-    _live_settings: gio::Settings,
+    _settings: SettingsStore,
 }
 
 impl App {
@@ -60,58 +58,82 @@ impl App {
         builder: gtk::Builder,
         sender: UnboundedSender<AppAction>,
     ) -> Self {
-        let state = AppState::new();
+        let state = AppState::default();
 
-        // Token
         let token_store = TokenStore::new();
         let token_provider: Arc<dyn riff_api::TokenProvider> = Arc::new(token_store.clone());
         let session_tokens = SessionTokens::new();
         let session_token_provider: Arc<dyn riff_api::TokenProvider> =
             Arc::new(session_tokens.clone());
 
-        // Setting
-        let gsettings = gio::Settings::new(crate::settings::SETTINGS);
+        let settings_store = SettingsStore::new();
 
-        // API
-        let memory_cache_mb = gsettings.uint("memory-cache-size-mb").max(1) as usize;
-        let disk_cache_mb = gsettings.uint("disk-cache-size-mb").max(1) as usize;
         let api_service = Arc::new(riff_api::spotify_service(
             token_provider,
             session_token_provider,
-            memory_cache_mb * 1024 * 1024,
-            disk_cache_mb * 1024 * 1024,
+            megabytes(settings_store.uint(Setting::MemoryCacheSizeMb)),
+            megabytes(settings_store.uint(Setting::DiskCacheSizeMb)),
         ));
 
-        let live_settings =
-            App::watch_live_settings(gsettings, Arc::clone(&api_service), sender.clone());
+        let dispatcher = Dispatcher::new(sender.clone());
+        settings_store.watch(move |changed| {
+            dispatcher.dispatch(AppAction::Core(Action::SettingsChanged(changed)));
+        });
         let model = Rc::new(AppModel::new(state, api_service));
 
-        let player_command_sender = crate::player::start_player_service(
+        let player_events = player_events::forward_player_events(sender.clone());
+        let effects = {
+            let player = &settings.player_settings;
+            riff_audio_engine::Effects::new(
+                player.eq_bands,
+                player.mono_audio,
+                player.pan,
+                player.pitch_cents,
+            )
+        };
+        let player_command_sender = riff_playback::player::start_player_service(
             settings.player_settings.clone(),
-            sender.clone(),
+            player_events.clone(),
             token_store,
             session_tokens,
+            effects.clone(),
+            model.api().uris(),
+        );
+        let run_log = RunLog::open(glib::user_data_dir().join("riff").join("schedule"));
+        let this_computer = ThisComputer::new(
+            ThisDevice::new(player_command_sender.clone()),
+            remote_playback::start_soloist(&model.api(), player_events.clone(), effects, run_log),
+        );
+        let engine_setup = EngineSetup::new(this_computer.clone());
+
+        let controller = remote_playback::start_remote_playback(
+            model.api(),
+            Arc::new(this_computer.clone()),
+            sender.clone(),
         );
 
-        let api = model.api();
-        let connect_command_sender = crate::connect::start_connect_server(api, sender.clone());
-
-        // Non widget components
         let components: Vec<Box<dyn EventListener>> = vec![
             Box::new(PlayerNotifier::new(
-                Rc::clone(&model),
                 Dispatcher::new(sender.clone()),
                 player_command_sender.clone(),
-                connect_command_sender,
+                controller,
             )),
-            Box::new(QueueLoader::new(
+            Box::new(StateTracker::new_from_gsettings()),
+            Box::new(CacheSizes {
+                api: model.api(),
+                settings: settings_store.clone(),
+            }),
+            Box::new(PinStore::new(
                 Rc::clone(&model),
                 Dispatcher::new(sender.clone()),
             )),
-            Box::new(StateTracker::new_from_gsettings()),
-            App::make_dbus(Rc::clone(&model), sender.clone()),
+            App::make_mpris(Rc::clone(&model), sender.clone()),
             App::make_inhibitor(&builder, Rc::clone(&model)),
         ];
+        let components = components
+            .into_iter()
+            .chain([Box::new(engine_setup) as Box<dyn EventListener>])
+            .collect();
 
         Self {
             settings,
@@ -119,63 +141,38 @@ impl App {
             components,
             model,
             sender,
+            this_computer,
             #[cfg(debug_assertions)]
             player_command_sender,
-            _live_settings: live_settings,
+            _settings: settings_store,
         }
-    }
-
-    fn watch_live_settings(
-        settings: gio::Settings,
-        api: Arc<riff_api::ApiService>,
-        sender: UnboundedSender<AppAction>,
-    ) -> gio::Settings {
-        let dispatcher = Dispatcher::new(sender);
-        settings.connect_changed(Some(FeatureFlag::PinnedObjects.key()), move |_, _| {
-            dispatcher.dispatch(BrowserAction::NotifyPinnedPlaylistsUpdated.into());
-        });
-        let memory_api = Arc::clone(&api);
-        settings.connect_changed(Some("memory-cache-size-mb"), move |settings, key| {
-            let mb = settings.uint(key).max(1) as usize;
-            memory_api.set_memory_cache_bytes(mb * 1024 * 1024);
-        });
-        settings.connect_changed(Some("disk-cache-size-mb"), move |settings, key| {
-            let mb = settings.uint(key).max(1) as usize;
-            let api = Arc::clone(&api);
-            tokio::spawn(async move { api.set_disk_cache_bytes(mb * 1024 * 1024).await });
-        });
-        settings
     }
 
     fn add_ui_components(&mut self) {
-        // Most components will need some or all of these to work
-        // ie some way to retrieve widgets
         let builder = &self.builder;
-        // ...some way to read the app state
         let model = &self.model;
-        // ...some (basic) way to send actions that will change the app state
         let sender = &self.sender;
-        // ...ALSO some way to send actions, but more conveniently
         let dispatcher = Dispatcher::new(sender.clone());
 
-        // Send gsettings updates for saved settings like repeat mode, shuffle, etc.
-        // has to be done after the UI loads, otherwise visual glitches occour.
         for action in self.settings.player_settings.actions() {
-            sender.unbounded_send(action).unwrap();
+            sender.unbounded_send(action.into()).unwrap();
         }
 
-        // The app-wide header bar and the registry screens contribute to it.
         let app_header: AppHeaderBar = builder.object("app_header").unwrap();
         let header_models: HeaderModelRegistry = Rc::new(RefCell::new(HashMap::new()));
         let registrar = HeaderRegistrar::new(app_header.clone(), Rc::clone(&header_models));
 
         let layout = WindowLayout::new(builder);
 
-        // All components that will be available initially
+        let login = App::make_login(builder, dispatcher.clone(), self.this_computer.clone());
+        #[cfg(debug_assertions)]
+        let login_window = login.login_window();
+
         let mut components: Vec<Box<dyn EventListener>> = vec![
             App::make_window(&self.settings, builder, Rc::clone(model)),
             App::make_selection_toolbar(builder, Rc::clone(model), dispatcher.clone()),
             App::make_playback(builder, Rc::clone(model), dispatcher.clone()),
+            App::make_device_selector(builder, Rc::clone(model), dispatcher.clone()),
             App::make_panel_manager(
                 builder,
                 layout,
@@ -183,10 +180,8 @@ impl App {
                 Rc::clone(model),
                 dispatcher.clone(),
             ),
-            App::make_login(builder, dispatcher.clone()),
+            login,
             App::make_navigation(builder, Rc::clone(model), dispatcher.clone(), registrar),
-            // After navigation, so a pushed screen registers before the header
-            // refreshes.
             App::make_app_header(
                 app_header,
                 Rc::clone(model),
@@ -201,17 +196,23 @@ impl App {
 
         // Wire up dev tools menu (debug builds only)
         #[cfg(debug_assertions)]
-        dev_tools::wire_dev_tools(builder, sender, &self.player_command_sender, model);
+        dev_tools::wire_dev_tools(
+            builder,
+            sender,
+            &self.player_command_sender,
+            &self.this_computer,
+            model,
+            &login_window,
+        );
 
         self.components.append(&mut components);
     }
 
-    // A component to handle anything DBUS related
-    fn make_dbus(
+    fn make_mpris(
         app_model: Rc<AppModel>,
         sender: UnboundedSender<AppAction>,
     ) -> Box<impl EventListener> {
-        Box::new(crate::dbus::start_dbus_server(app_model, sender))
+        Box::new(mpris::MprisListener::start(app_model, sender))
     }
 
     fn make_window(
@@ -223,7 +224,6 @@ impl App {
         Box::new(MainWindow::new(settings.window.clone(), app_model, window))
     }
 
-    // The app-wide header bar shared by every content screen.
     fn make_app_header(
         widget: AppHeaderBar,
         app_model: Rc<AppModel>,
@@ -252,7 +252,6 @@ impl App {
         let window: libadwaita::ApplicationWindow = builder.object("window").unwrap();
 
         let model = NavigationModel::new(Rc::clone(&app_model), dispatcher.clone());
-        // This is where components that are not created initially will be assembled
         let screen_factory =
             ScreenFactory::new(Rc::clone(&app_model), dispatcher.clone(), registrar);
         Box::new(Navigation::new(
@@ -265,10 +264,15 @@ impl App {
         ))
     }
 
-    fn make_login(builder: &gtk::Builder, dispatcher: Dispatcher) -> Box<Login> {
+    fn make_login(
+        builder: &gtk::Builder,
+        dispatcher: Dispatcher,
+        this_computer: ThisComputer,
+    ) -> Box<Login> {
         let parent: gtk::Window = builder.object("window").unwrap();
-        let model = LoginModel::new(dispatcher);
-        Box::new(Login::new(parent, model))
+        let about: libadwaita::AboutDialog = builder.object("about").unwrap();
+        let model = LoginModel::new(dispatcher, this_computer);
+        Box::new(Login::new(parent, model, about))
     }
 
     fn make_selection_toolbar(
@@ -292,6 +296,18 @@ impl App {
             model,
             builder.object("playback").unwrap(),
             builder.object("queue_bar").unwrap(),
+        ))
+    }
+
+    fn make_device_selector(
+        builder: &gtk::Builder,
+        app_model: Rc<AppModel>,
+        dispatcher: Dispatcher,
+    ) -> Box<impl EventListener> {
+        let playback: PlaybackWidget = builder.object("playback").unwrap();
+        Box::new(DeviceSelector::new(
+            playback.device_selector(),
+            DeviceSelectorModel::new(app_model, dispatcher),
         ))
     }
 
@@ -365,21 +381,15 @@ impl App {
         Box::new(ClipboardImport::new(window, dispatcher, app_model))
     }
 
-    // Main handler called in a loop
     fn handle(&mut self, action: AppAction) {
         let starting = matches!(&action, &AppAction::Start);
 
-        // Update the state based on an incoming action
-        // and obtain events representing what that mutation entailed...
         let events = self.model.update_state(action);
 
-        // (AppAction::Start is special and is used to setup the initial components)
         if !events.is_empty() && starting {
             self.add_ui_components();
         }
 
-        // ...and notify every component that we know.
-        // They'll be responsible for passing down these events, if they feel like it.
         for event in events.iter() {
             info!("Event: {event:?}");
             for component in self.components.iter_mut() {
@@ -388,19 +398,12 @@ impl App {
         }
     }
 
-    // Here is the loop
     pub async fn attach(mut self, dispatch_loop: DispatchLoop) {
-        // Runtime and guard both leak: GTK callbacks spawn onto this for the
-        // life of the process, and a dropped guard makes a later spawn panic.
         let rt = Box::leak(Box::new(
             tokio::runtime::Runtime::new().expect("Failed to acquire tokio runtime"),
         ));
         std::mem::forget(rt.enter());
 
-        // Evict any disk cache left over-budget by a previous session. Run
-        // here (rather than at construction in `App::new`) because this is
-        // where the app's Tokio runtime is entered; the data layer's async
-        // disk I/O requires one.
         let maintenance = self.model.api();
         rt.spawn(async move {
             maintenance.run_cache_maintenance().await;
@@ -413,5 +416,32 @@ impl App {
                 app.handle(action);
             })
             .await;
+    }
+}
+
+struct CacheSizes {
+    api: Arc<riff_api::ApiService>,
+    settings: SettingsStore,
+}
+
+impl CacheSizes {
+    fn apply(&self, changed: &SettingsChanged) {
+        if changed.contains(Setting::MemoryCacheSizeMb) {
+            let bytes = megabytes(self.settings.uint(Setting::MemoryCacheSizeMb));
+            self.api.set_memory_cache_bytes(bytes);
+        }
+        if changed.contains(Setting::DiskCacheSizeMb) {
+            let bytes = megabytes(self.settings.uint(Setting::DiskCacheSizeMb));
+            let api = Arc::clone(&self.api);
+            tokio::spawn(async move { api.set_disk_cache_bytes(bytes).await });
+        }
+    }
+}
+
+impl EventListener for CacheSizes {
+    fn on_event(&mut self, event: &AppEvent) {
+        if let Some(changed) = event.settings() {
+            self.apply(changed);
+        }
     }
 }

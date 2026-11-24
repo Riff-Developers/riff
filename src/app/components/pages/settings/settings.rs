@@ -1,8 +1,8 @@
-use crate::app::components::{labels, EventListener};
+use crate::app::components::EventListener;
 use crate::app::AppEvent;
-use crate::settings::RiffSettings;
-use riff_config::feature_flags::FeatureFlag;
+use riff_config::feature_flag::FeatureFlag;
 
+use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 
 use gtk::prelude::*;
@@ -10,12 +10,61 @@ use gtk::subclass::prelude::*;
 use gtk::CompositeTemplate;
 use libadwaita::prelude::*;
 
+use super::choice_row::ChoiceRow;
 use super::EqualizerWidget;
 use super::PanWidget;
 use super::PitchWidget;
 use super::SettingsModel;
 
-use riff_config::settings::{RESTART_REQUIRED_KEYS, SETTINGS};
+use riff_config::{Setting, SettingsStore, SettingsSupport};
+
+const CHOICES: &[(Setting, &[&str])] = &[
+    (Setting::PlayerBitrate, &["96", "160", "320", "lossless"]),
+    (Setting::AudioBackend, &["pulseaudio", "alsa"]),
+    (
+        Setting::AudioFormat,
+        &["s16", "s24", "s24_3", "s32", "f32", "f64"],
+    ),
+    (Setting::VolumeCurve, &["log", "linear", "cubic"]),
+    (Setting::NormalisationType, &["auto", "track", "album"]),
+    (Setting::NormalisationMethod, &["dynamic", "basic"]),
+];
+
+#[derive(Debug)]
+pub struct NumberRow {
+    setting: Setting,
+    adjustment: gtk::Adjustment,
+    lower: f64,
+    upper: f64,
+    unsigned: bool,
+    on_change: glib::SignalHandlerId,
+}
+
+impl NumberRow {
+    fn stored(&self, settings: &SettingsStore) -> f64 {
+        if self.unsigned {
+            f64::from(settings.uint(self.setting))
+        } else {
+            settings.double(self.setting)
+        }
+    }
+
+    /// Narrows the range to what `support` takes and shows the stored value
+    /// in it, without saving over it.
+    fn apply(&self, support: &SettingsSupport, settings: &SettingsStore) {
+        let (lower, upper) = support
+            .range(self.setting)
+            .map_or((self.lower, self.upper), |(min, max)| {
+                (min.max(self.lower), max.min(self.upper))
+            });
+        self.adjustment.block_signal(&self.on_change);
+        self.adjustment.set_lower(lower);
+        self.adjustment.set_upper(upper);
+        self.adjustment
+            .set_value(self.stored(settings).clamp(lower, upper));
+        self.adjustment.unblock_signal(&self.on_change);
+    }
+}
 
 mod imp {
 
@@ -44,6 +93,15 @@ mod imp {
         pub ap_port: TemplateChild<gtk::Entry>,
 
         #[template_child]
+        pub ap_port_row: TemplateChild<libadwaita::ActionRow>,
+
+        #[template_child]
+        pub audio_group: TemplateChild<libadwaita::PreferencesGroup>,
+
+        #[template_child]
+        pub network_group: TemplateChild<libadwaita::PreferencesGroup>,
+
+        #[template_child]
         pub theme: TemplateChild<libadwaita::ComboRow>,
 
         #[template_child]
@@ -57,9 +115,6 @@ mod imp {
 
         #[template_child]
         pub skip_explicit_switch: TemplateChild<libadwaita::SwitchRow>,
-
-        #[template_child]
-        pub shuffle_separation: TemplateChild<libadwaita::SpinRow>,
 
         #[template_child]
         pub volume_curve: TemplateChild<libadwaita::ComboRow>,
@@ -117,6 +172,11 @@ mod imp {
 
         #[template_child]
         pub clear_cache_button: TemplateChild<gtk::Button>,
+
+        pub support: RefCell<SettingsSupport>,
+        pub choices: RefCell<Vec<ChoiceRow>>,
+        pub numbers: RefCell<Vec<NumberRow>>,
+        pub watcher: OnceCell<SettingsStore>,
     }
 
     #[glib::object_subclass]
@@ -155,192 +215,48 @@ impl SettingsDialog {
     pub fn new() -> Self {
         let dialog: Self = glib::Object::new();
 
-        dialog.bind_backend_and_device();
         dialog.bind_settings();
-        dialog.setup_bitrate_lossless_factory();
+        dialog.bind_choices();
         dialog.bind_feature_flags();
         dialog.connect_theme_select();
+        dialog.watch_visibility();
         dialog
-    }
-
-    fn bind_backend_and_device(&self) {
-        let widget = self.imp();
-
-        let audio_backend = widget
-            .audio_backend
-            .downcast_ref::<libadwaita::ComboRow>()
-            .unwrap();
-        let alsa_device_row = widget
-            .alsa_device_row
-            .downcast_ref::<libadwaita::ActionRow>()
-            .unwrap();
-
-        audio_backend
-            .bind_property("selected", alsa_device_row, "visible")
-            .transform_to(|_, value: u32| Some(value == 1))
-            .build();
-
-        if audio_backend.selected() == 0 {
-            alsa_device_row.set_visible(false);
-        }
-    }
-
-    /// Installs a list factory on the Audio Quality combo row that renders the
-    /// "Lossless" entry as a disabled option: its label is dimmed, it cannot be
-    /// selected, and a warning icon is shown next to it. Hovering the warning
-    /// icon reveals a tooltip explaining why the option is unavailable.
-    fn setup_bitrate_lossless_factory(&self) {
-        // Index of the "Lossless" entry in the Audio Quality string list.
-        const LOSSLESS_INDEX: u32 = 3;
-
-        let player_bitrate = self
-            .imp()
-            .player_bitrate
-            .downcast_ref::<libadwaita::ComboRow>()
-            .unwrap();
-
-        let factory = gtk::SignalListItemFactory::new();
-
-        factory.connect_setup(|_, item| {
-            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-
-            let label = gtk::Label::new(None);
-            label.set_xalign(0.0);
-            label.set_hexpand(true);
-
-            let warning = gtk::Image::from_icon_name("dialog-warning-symbolic");
-            warning.set_visible(false);
-
-            row.append(&label);
-            row.append(&warning);
-            item.set_child(Some(&row));
-        });
-
-        factory.connect_bind(|_, item| {
-            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-            let Some(row) = item.child().and_downcast::<gtk::Box>() else {
-                return;
-            };
-            let Some(label) = row.first_child().and_downcast::<gtk::Label>() else {
-                return;
-            };
-            let Some(warning) = row.last_child().and_downcast::<gtk::Image>() else {
-                return;
-            };
-
-            let text = item
-                .item()
-                .and_downcast::<gtk::StringObject>()
-                .map(|s| s.string().to_string())
-                .unwrap_or_default();
-            label.set_label(&text);
-
-            if item.position() == LOSSLESS_INDEX {
-                label.add_css_class("dim-label");
-                warning.set_visible(true);
-                row.set_tooltip_text(Some(&gettextrs::gettext(
-                    "Unsupported due to legal restrictions.",
-                )));
-                // Prevent the entry from being chosen from the dropdown.
-                item.set_selectable(false);
-                item.set_activatable(false);
-            } else {
-                // Reset state in case this list item widget is being reused.
-                label.remove_css_class("dim-label");
-                warning.set_visible(false);
-                row.set_tooltip_text(None);
-                item.set_selectable(true);
-                item.set_activatable(true);
-            }
-        });
-
-        // Only the popup list needs the custom factory; the selected value shown
-        // on the row keeps the combo row's default rendering.
-        player_bitrate.set_list_factory(Some(&factory));
     }
 
     fn bind_settings(&self) {
         let widget = self.imp();
-        let settings = gio::Settings::new(SETTINGS);
+        let settings = SettingsStore::new();
 
-        // Binds a GtkAdjustment (from a SpinRow or Scale) to a double GSettings key.
-        //
-        // We deliberately avoid `Settings::bind` here: its bidirectional binding
-        // causes a feedback loop with spin/scale widgets where a single step is
-        // written to GSettings and then immediately reverted by the `changed`
-        // write-back. Instead we load the initial value and write on every change.
-        let bind_double_adjustment = |key: &str, adjustment: &gtk::Adjustment| {
-            adjustment.set_value(settings.double(key));
-            let settings = settings.clone();
-            let key = key.to_owned();
-            adjustment.connect_value_changed(move |adj| {
-                let _ = settings.set_double(&key, adj.value());
+        let bind_adjustment = |setting: Setting, adjustment: &gtk::Adjustment, unsigned: bool| {
+            let saved = settings.clone();
+            let on_change = adjustment.connect_value_changed(move |adj| {
+                let _ = if unsigned {
+                    saved.set_uint(setting, adj.value() as u32)
+                } else {
+                    saved.set_double(setting, adj.value())
+                };
             });
+            let number = NumberRow {
+                setting,
+                adjustment: adjustment.clone(),
+                lower: adjustment.lower(),
+                upper: adjustment.upper(),
+                unsigned,
+                on_change,
+            };
+            number.apply(&SettingsSupport::none(), &settings);
+            widget.numbers.borrow_mut().push(number);
+        };
+        let bind_double_adjustment = |setting: Setting, adjustment: &gtk::Adjustment| {
+            bind_adjustment(setting, adjustment, false)
+        };
+        let bind_uint_adjustment = |setting: Setting, adjustment: &gtk::Adjustment| {
+            bind_adjustment(setting, adjustment, true)
         };
 
-        let player_bitrate = widget
-            .player_bitrate
-            .downcast_ref::<libadwaita::ComboRow>()
-            .unwrap();
-        // "Lossless" is shown as a disabled, non-selectable option (see
-        // setup_bitrate_lossless_factory), so it never reaches the mapping below.
-        settings
-            .bind("player-bitrate", player_bitrate, "selected")
-            .mapping(|variant, _| {
-                variant.str().map(|s| {
-                    match s {
-                        "96" => 0,
-                        "160" => 1,
-                        "320" => 2,
-                        _ => unreachable!(),
-                    }
-                    .to_value()
-                })
-            })
-            .set_mapping(|value, _| {
-                value.get::<u32>().ok().and_then(|u| {
-                    match u {
-                        0 => Some("96"),
-                        1 => Some("160"),
-                        2 => Some("320"),
-                        // "Lossless" cannot be selected, so ignore any other index.
-                        _ => None,
-                    }
-                    .map(|s| s.to_variant())
-                })
-            })
-            .build();
-
         let alsa_device = widget.alsa_device.downcast_ref::<gtk::Entry>().unwrap();
-        settings.bind("alsa-device", alsa_device, "text").build();
-
-        let audio_backend = widget
-            .audio_backend
-            .downcast_ref::<libadwaita::ComboRow>()
-            .unwrap();
         settings
-            .bind("audio-backend", audio_backend, "selected")
-            .mapping(|variant, _| {
-                variant.str().map(|s| {
-                    match s {
-                        "pulseaudio" => 0,
-                        "alsa" => 1,
-                        _ => unreachable!(),
-                    }
-                    .to_value()
-                })
-            })
-            .set_mapping(|value, _| {
-                value.get::<u32>().ok().map(|u| {
-                    match u {
-                        0 => "pulseaudio",
-                        1 => "alsa",
-                        _ => unreachable!(),
-                    }
-                    .to_variant()
-                })
-            })
+            .bind(Setting::AlsaDevice, alsa_device, "text")
             .build();
 
         let gapless_playback = widget
@@ -348,158 +264,30 @@ impl SettingsDialog {
             .downcast_ref::<libadwaita::SwitchRow>()
             .unwrap();
         settings
-            .bind("gapless-playback", gapless_playback, "active")
+            .bind(Setting::GaplessPlayback, gapless_playback, "active")
             .build();
 
         let ap_port = widget.ap_port.downcast_ref::<gtk::Entry>().unwrap();
         settings
-            .bind("ap-port", ap_port, "text")
+            .bind(Setting::ApPort, ap_port, "text")
             .mapping(|variant, _| variant.get::<u32>().map(|s| s.to_value()))
             .set_mapping(|value, _| value.get::<u32>().ok().map(|u| u.to_variant()))
             .build();
 
-        // Volume curve
-        let volume_curve = widget
-            .volume_curve
-            .downcast_ref::<libadwaita::ComboRow>()
-            .unwrap();
-        settings
-            .bind("volume-curve", volume_curve, "selected")
-            .mapping(|variant, _| {
-                variant.str().map(|s| {
-                    match s {
-                        "log" => 0,
-                        "linear" => 1,
-                        "cubic" => 2,
-                        _ => 0,
-                    }
-                    .to_value()
-                })
-            })
-            .set_mapping(|value, _| {
-                value.get::<u32>().ok().map(|u| {
-                    match u {
-                        0 => "log",
-                        1 => "linear",
-                        2 => "cubic",
-                        _ => "log",
-                    }
-                    .to_variant()
-                })
-            })
-            .build();
-
-        // Mono audio
         let mono_audio_switch = widget
             .mono_audio_switch
             .downcast_ref::<libadwaita::SwitchRow>()
             .unwrap();
         settings
-            .bind("mono-audio", mono_audio_switch, "active")
+            .bind(Setting::MonoAudio, mono_audio_switch, "active")
             .build();
 
-        // Audio format
-        let audio_format = widget
-            .audio_format
-            .downcast_ref::<libadwaita::ComboRow>()
-            .unwrap();
-        settings
-            .bind("audio-format", audio_format, "selected")
-            .mapping(|variant, _| {
-                variant.str().map(|s| {
-                    match s {
-                        "s16" => 0,
-                        "s24" => 1,
-                        "s24_3" => 2,
-                        "s32" => 3,
-                        "f32" => 4,
-                        "f64" => 5,
-                        _ => 0,
-                    }
-                    .to_value()
-                })
-            })
-            .set_mapping(|value, _| {
-                value.get::<u32>().ok().map(|u| {
-                    match u {
-                        0 => "s16",
-                        1 => "s24",
-                        2 => "s24_3",
-                        3 => "s32",
-                        4 => "f32",
-                        5 => "f64",
-                        _ => "s16",
-                    }
-                    .to_variant()
-                })
-            })
-            .build();
-
-        // Normalisation
         let normalisation_switch = widget
             .normalisation_switch
             .downcast_ref::<libadwaita::SwitchRow>()
             .unwrap();
         settings
-            .bind("normalisation", normalisation_switch, "active")
-            .build();
-
-        let normalisation_type = widget
-            .normalisation_type
-            .downcast_ref::<libadwaita::ComboRow>()
-            .unwrap();
-        settings
-            .bind("normalisation-type", normalisation_type, "selected")
-            .mapping(|variant, _| {
-                variant.str().map(|s| {
-                    match s {
-                        "auto" => 0,
-                        "track" => 1,
-                        "album" => 2,
-                        _ => 0,
-                    }
-                    .to_value()
-                })
-            })
-            .set_mapping(|value, _| {
-                value.get::<u32>().ok().map(|u| {
-                    match u {
-                        0 => "auto",
-                        1 => "track",
-                        2 => "album",
-                        _ => "auto",
-                    }
-                    .to_variant()
-                })
-            })
-            .build();
-
-        let normalisation_method = widget
-            .normalisation_method
-            .downcast_ref::<libadwaita::ComboRow>()
-            .unwrap();
-        settings
-            .bind("normalisation-method", normalisation_method, "selected")
-            .mapping(|variant, _| {
-                variant.str().map(|s| {
-                    match s {
-                        "dynamic" => 0,
-                        "basic" => 1,
-                        _ => 0,
-                    }
-                    .to_value()
-                })
-            })
-            .set_mapping(|value, _| {
-                value.get::<u32>().ok().map(|u| {
-                    match u {
-                        0 => "dynamic",
-                        1 => "basic",
-                        _ => "dynamic",
-                    }
-                    .to_variant()
-                })
-            })
+            .bind(Setting::Normalisation, normalisation_switch, "active")
             .build();
 
         let normalisation_pregain = widget
@@ -507,7 +295,7 @@ impl SettingsDialog {
             .downcast_ref::<libadwaita::SpinRow>()
             .unwrap();
         bind_double_adjustment(
-            "normalisation-pregain-db",
+            Setting::NormalisationPregainDb,
             &normalisation_pregain.adjustment(),
         );
 
@@ -516,7 +304,7 @@ impl SettingsDialog {
             .downcast_ref::<libadwaita::SpinRow>()
             .unwrap();
         bind_double_adjustment(
-            "normalisation-threshold-dbfs",
+            Setting::NormalisationThresholdDbfs,
             &normalisation_threshold.adjustment(),
         );
 
@@ -525,7 +313,7 @@ impl SettingsDialog {
             .downcast_ref::<libadwaita::SpinRow>()
             .unwrap();
         bind_double_adjustment(
-            "normalisation-attack-ms",
+            Setting::NormalisationAttackMs,
             &normalisation_attack.adjustment(),
         );
 
@@ -534,7 +322,7 @@ impl SettingsDialog {
             .downcast_ref::<libadwaita::SpinRow>()
             .unwrap();
         bind_double_adjustment(
-            "normalisation-release-ms",
+            Setting::NormalisationReleaseMs,
             &normalisation_release.adjustment(),
         );
 
@@ -542,11 +330,14 @@ impl SettingsDialog {
             .normalisation_knee
             .downcast_ref::<libadwaita::SpinRow>()
             .unwrap();
-        bind_double_adjustment("normalisation-knee-db", &normalisation_knee.adjustment());
+        bind_double_adjustment(
+            Setting::NormalisationKneeDb,
+            &normalisation_knee.adjustment(),
+        );
 
         let theme = widget.theme.downcast_ref::<libadwaita::ComboRow>().unwrap();
         settings
-            .bind("theme-preference", theme, "selected")
+            .bind(Setting::ThemePreference, theme, "selected")
             .mapping(|variant, _| {
                 variant.str().map(|s| {
                     match s {
@@ -573,7 +364,7 @@ impl SettingsDialog {
 
         settings
             .bind(
-                crate::settings::QUEUE_SIDE_PANEL,
+                Setting::QueueSidePanel,
                 &*widget.queue_side_panel_switch,
                 "active",
             )
@@ -584,7 +375,7 @@ impl SettingsDialog {
             .downcast_ref::<libadwaita::ComboRow>()
             .unwrap();
         settings
-            .bind("close-window-behavior", close_behavior, "selected")
+            .bind(Setting::CloseWindowBehavior, close_behavior, "selected")
             .mapping(|variant, _| {
                 variant.str().map(|s| {
                     match s {
@@ -609,109 +400,49 @@ impl SettingsDialog {
             })
             .build();
 
-        // Keep device awake while playing (inhibit automatic system suspend).
         let inhibit_suspend_switch = widget
             .inhibit_suspend_switch
             .downcast_ref::<libadwaita::SwitchRow>()
             .expect("inhibit_suspend_switch must be a SwitchRow");
         settings
-            .bind("inhibit-suspend", inhibit_suspend_switch, "active")
+            .bind(Setting::InhibitSuspend, inhibit_suspend_switch, "active")
             .build();
 
-        // Skip explicit tracks (local preference). When the account locks the
-        // filter, `show_self` overrides this switch to on and disables it.
         let skip_explicit_switch = widget
             .skip_explicit_switch
             .downcast_ref::<libadwaita::SwitchRow>()
             .expect("skip_explicit_switch must be a SwitchRow");
         settings
-            .bind("skip-explicit", skip_explicit_switch, "active")
+            .bind(Setting::SkipExplicit, skip_explicit_switch, "active")
             .build();
 
-        let separation_row = widget.shuffle_separation.get();
-        let separation_adjustment = separation_row.adjustment();
-        let separation = settings.uint("shuffle-separation");
-        separation_adjustment.set_value(separation as f64);
-        separation_row.set_subtitle(&labels::shuffle_separation_label(separation));
-        {
-            let settings = settings.clone();
-            let separation_row = separation_row.downgrade();
-            separation_adjustment.connect_value_changed(move |adj| {
-                let separation = adj.value() as u32;
-                if let Some(row) = separation_row.upgrade() {
-                    row.set_subtitle(&labels::shuffle_separation_label(separation));
-                }
-                let _ = settings.set_uint("shuffle-separation", separation);
-            });
-        }
-
-        // Memory cache size (MB). Bound manually rather than via `Settings::bind`
-        // for the same spin-row feedback-loop reason noted above, and because the
-        // key is a uint while the adjustment is a double.
-        let memory_cache_size = widget
-            .memory_cache_size
-            .downcast_ref::<libadwaita::SpinRow>()
-            .unwrap();
-        let cache_adjustment = memory_cache_size.adjustment();
-        cache_adjustment.set_value(settings.uint("memory-cache-size-mb") as f64);
-        {
-            let settings = settings.clone();
-            cache_adjustment.connect_value_changed(move |adj| {
-                let _ = settings.set_uint("memory-cache-size-mb", adj.value() as u32);
-            });
-        }
-
-        // Disk (image) cache size (MB). Same manual-binding rationale as above.
-        let disk_cache_size = widget
-            .disk_cache_size
-            .downcast_ref::<libadwaita::SpinRow>()
-            .unwrap();
-        let disk_adjustment = disk_cache_size.adjustment();
-        disk_adjustment.set_value(settings.uint("disk-cache-size-mb") as f64);
-        {
-            let settings = settings.clone();
-            disk_adjustment.connect_value_changed(move |adj| {
-                let _ = settings.set_uint("disk-cache-size-mb", adj.value() as u32);
-            });
-        }
-
-        // Audio cache on disk size (MB).
-        let audio_cache_size = widget
-            .audio_cache_size
-            .downcast_ref::<libadwaita::SpinRow>()
-            .unwrap();
-        let audio_adjustment = audio_cache_size.adjustment();
-        audio_adjustment.set_value(settings.uint("audio-cache-size-mb") as f64);
-        {
-            let settings = settings.clone();
-            audio_adjustment.connect_value_changed(move |adj| {
-                let _ = settings.set_uint("audio-cache-size-mb", adj.value() as u32);
-            });
-        }
+        bind_uint_adjustment(
+            Setting::MemoryCacheSizeMb,
+            &widget.memory_cache_size.adjustment(),
+        );
+        bind_uint_adjustment(
+            Setting::DiskCacheSizeMb,
+            &widget.disk_cache_size.adjustment(),
+        );
+        bind_uint_adjustment(
+            Setting::AudioCacheSizeMb,
+            &widget.audio_cache_size.adjustment(),
+        );
     }
 
     fn bind_feature_flags(&self) {
-        let settings = gio::Settings::new(SETTINGS);
+        let settings = SettingsStore::new();
         let group = libadwaita::PreferencesGroup::new();
         group.set_title(&gettextrs::gettext("Experimental Features"));
         group.set_description(Some(&gettextrs::gettext(
             "These features are still in development and may be unstable or incomplete.",
         )));
 
-        settings
-            .bind(
-                FeatureFlag::Normalisation.key(),
-                &*self.imp().normalisation_group,
-                "visible",
-            )
-            .get()
-            .build();
-
         for flag in FeatureFlag::ALL.iter() {
             let row = libadwaita::SwitchRow::new();
             row.set_title(flag.title());
             row.set_subtitle(flag.description());
-            settings.bind(flag.key(), &row, "active").build();
+            settings.bind(flag.setting(), &row, "active").build();
             group.add(&row);
         }
 
@@ -720,6 +451,178 @@ impl SettingsDialog {
             .visible_page()
             .unwrap();
         page.add(&group);
+    }
+
+    /// Lists in each choice row the choices of its setting.
+    fn bind_choices(&self) {
+        let widget = self.imp();
+        let rows = CHOICES.iter().map(|&(setting, values)| {
+            let row = match setting {
+                Setting::PlayerBitrate => &widget.player_bitrate,
+                Setting::AudioBackend => &widget.audio_backend,
+                Setting::AudioFormat => &widget.audio_format,
+                Setting::VolumeCurve => &widget.volume_curve,
+                Setting::NormalisationType => &widget.normalisation_type,
+                Setting::NormalisationMethod => &widget.normalisation_method,
+                _ => unreachable!("{:?} has no choice row", setting),
+            };
+            ChoiceRow::new(setting, row, values)
+        });
+        widget.choices.borrow_mut().extend(rows);
+        self.apply_support(SettingsSupport::none());
+    }
+
+    /// The rows and groups of settings that depend on the player, and the
+    /// settings that show them: one is shown if any of its settings is
+    /// supported.
+    fn player_rows(&self) -> Vec<(&'static [Setting], gtk::Widget)> {
+        let widget = self.imp();
+        vec![
+            (
+                &[Setting::PlayerBitrate],
+                widget.player_bitrate.get().upcast(),
+            ),
+            (
+                &[Setting::AudioBackend],
+                widget.audio_backend.get().upcast(),
+            ),
+            (
+                &[Setting::AlsaDevice],
+                widget.alsa_device_row.get().upcast(),
+            ),
+            (&[Setting::AudioFormat], widget.audio_format.get().upcast()),
+            (
+                &[Setting::GaplessPlayback],
+                widget.gapless_playback.get().upcast(),
+            ),
+            (&[Setting::VolumeCurve], widget.volume_curve.get().upcast()),
+            (
+                &[Setting::MonoAudio],
+                widget.mono_audio_switch.get().upcast(),
+            ),
+            (
+                &[Setting::SkipExplicit],
+                widget.skip_explicit_switch.get().upcast(),
+            ),
+            (
+                &[Setting::Normalisation],
+                widget.normalisation_switch.get().upcast(),
+            ),
+            (
+                &[Setting::NormalisationType],
+                widget.normalisation_type.get().upcast(),
+            ),
+            (
+                &[Setting::NormalisationMethod],
+                widget.normalisation_method.get().upcast(),
+            ),
+            (
+                &[Setting::NormalisationPregainDb],
+                widget.normalisation_pregain.get().upcast(),
+            ),
+            (
+                &[Setting::NormalisationThresholdDbfs],
+                widget.normalisation_threshold.get().upcast(),
+            ),
+            (
+                &[Setting::NormalisationAttackMs],
+                widget.normalisation_attack.get().upcast(),
+            ),
+            (
+                &[Setting::NormalisationReleaseMs],
+                widget.normalisation_release.get().upcast(),
+            ),
+            (
+                &[Setting::NormalisationKneeDb],
+                widget.normalisation_knee.get().upcast(),
+            ),
+            (&Setting::EQ_BANDS, widget.equalizer.get().upcast()),
+            (&[Setting::Pan], widget.pan.get().upcast()),
+            (&[Setting::PitchCents], widget.pitch.get().upcast()),
+            (&[Setting::ApPort], widget.ap_port_row.get().upcast()),
+            (
+                &[Setting::AudioCacheSizeMb],
+                widget.audio_cache_size.get().upcast(),
+            ),
+        ]
+    }
+
+    /// Offers only what `support` says the player on this computer supports:
+    /// other settings are hidden, and choices and ranges narrowed. Stored
+    /// values are kept as they are.
+    pub fn apply_support(&self, support: SettingsSupport) {
+        let widget = self.imp();
+        *widget.support.borrow_mut() = support;
+        let settings = SettingsStore::new();
+        {
+            let support = widget.support.borrow();
+            for choice in widget.choices.borrow().iter() {
+                choice.apply(&support, &settings);
+            }
+            for number in widget.numbers.borrow().iter() {
+                number.apply(&support, &settings);
+            }
+        }
+        self.refresh_visibility();
+    }
+
+    /// Shows the rows the player supports, and the groups with a row shown.
+    fn refresh_visibility(&self) {
+        let widget = self.imp();
+        let support = widget.support.borrow();
+        let rows = self.player_rows();
+        for (settings, row) in &rows {
+            row.set_visible(support.supports_any(settings));
+        }
+
+        let alsa = widget
+            .choices
+            .borrow()
+            .iter()
+            .find(|choice| choice.setting() == Setting::AudioBackend)
+            .and_then(ChoiceRow::selected_value)
+            == Some("alsa");
+        if !alsa {
+            widget.alsa_device_row.set_visible(false);
+        }
+
+        let has_rows = |group: &libadwaita::PreferencesGroup| {
+            rows.iter()
+                .any(|(_, row)| row.get_visible() && row.is_ancestor(group))
+        };
+        widget
+            .audio_group
+            .set_visible(has_rows(&widget.audio_group));
+        widget
+            .network_group
+            .set_visible(has_rows(&widget.network_group));
+        let normalisation = &widget.normalisation_group;
+        normalisation.set_visible(
+            riff_config::feature_flag::is_enabled(FeatureFlag::Normalisation)
+                && has_rows(normalisation),
+        );
+    }
+
+    /// Updates what's shown when the backend or a feature flag changes.
+    fn watch_visibility(&self) {
+        let widget = self.imp();
+        let dialog = self.downgrade();
+        widget.audio_backend.connect_selected_notify(move |_| {
+            if let Some(dialog) = dialog.upgrade() {
+                dialog.refresh_visibility();
+            }
+        });
+
+        let store = SettingsStore::new();
+        let dialog = self.downgrade();
+        store.watch(move |changed| {
+            if changed.contains(FeatureFlag::Normalisation.setting()) {
+                if let Some(dialog) = dialog.upgrade() {
+                    dialog.refresh_visibility();
+                }
+            }
+        });
+        let _ = widget.watcher.set(store);
     }
 
     fn connect_theme_select(&self) {
@@ -808,31 +711,17 @@ impl Settings {
         let model = Rc::new(model);
 
         let close_model = model.clone();
-        settings_dialog.connect_close(move || {
-            let new_settings = RiffSettings::new_from_gsettings().unwrap_or_default();
-            // Only stop the player for changes that require a full reload.
-            // Equalizer changes are applied live and must not interrupt playback.
-            if close_model
-                .settings()
-                .player_settings
-                .requires_reload(&new_settings.player_settings)
-            {
-                close_model.stop_player();
-            }
-            close_model.set_settings();
-        });
+        settings_dialog.connect_close(move || close_model.apply_settings());
 
-        let gsettings = gio::Settings::new(SETTINGS);
-        let startup_values: Vec<_> = RESTART_REQUIRED_KEYS
-            .iter()
-            .map(|key| gsettings.value(key))
+        let gsettings = SettingsStore::new();
+        let startup_values: Vec<_> = Setting::restart_required()
+            .map(|setting| gsettings.value(setting))
             .collect();
         let restart_model = model.clone();
         settings_dialog.connect_closed(move || {
-            let changed = RESTART_REQUIRED_KEYS
-                .iter()
+            let changed = Setting::restart_required()
                 .zip(&startup_values)
-                .any(|(key, startup)| gsettings.value(key) != *startup);
+                .any(|(setting, startup)| gsettings.value(setting) != *startup);
             if changed {
                 restart_model.show_restart_required();
             }
@@ -855,10 +744,9 @@ impl Settings {
     }
 
     pub fn show_self(&self) {
-        // Locks are UI-only and must not be stateful between openings.
         self.settings_dialog.reset_locks();
-        // Reflect the account's explicit content filter lock each time the
-        // dialog opens, since it becomes known only after login.
+        self.settings_dialog
+            .apply_support(self.model.settings_support());
         self.settings_dialog
             .set_explicit_filter_locked(self.model.explicit_filter_locked());
         self.dialog().present(Some(&self.parent));

@@ -3,18 +3,17 @@ mod shell_box;
 pub use shell_box::expose_widgets;
 
 use gettextrs::gettext;
-use gio::prelude::SettingsExt;
 use gtk::prelude::*;
 use libadwaita::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::app::components::EventListener;
-use crate::app::state::LoginEvent;
+use crate::app::state::{ErrorKind, Event, SessionStatus};
 use crate::app::{AppEvent, AppModel};
 use crate::settings::{CloseWindowBehavior, WindowGeometry};
 
-use riff_config::settings::SETTINGS;
+use riff_config::SettingsStore;
 
 thread_local! {
     static WINDOW_GEOMETRY: RefCell<WindowGeometry> = const { RefCell::new(WindowGeometry {
@@ -34,7 +33,10 @@ impl MainWindow {
         app_model: Rc<AppModel>,
         window: libadwaita::ApplicationWindow,
     ) -> Self {
+        let settings = SettingsStore::new();
         window.connect_close_request(clone!(
+            #[strong]
+            settings,
             #[weak]
             app_model,
             #[upgrade_or]
@@ -45,10 +47,7 @@ impl MainWindow {
                     return glib::Propagation::Proceed;
                 }
 
-                let settings = gio::Settings::new(SETTINGS);
-                let behavior = CloseWindowBehavior::from_gsettings_enum(
-                    settings.enum_("close-window-behavior"),
-                );
+                let behavior = settings.close_window_behavior();
 
                 match behavior {
                     CloseWindowBehavior::MinimizeToBackground => {
@@ -68,9 +67,13 @@ impl MainWindow {
         window.connect_default_width_notify(Self::save_window_geometry);
         window.connect_maximized_notify(Self::save_window_geometry);
 
-        window.connect_unrealize(|_| {
+        window.connect_unrealize(move |_| {
             debug!("saving geometry");
-            WINDOW_GEOMETRY.with(|g| g.borrow().save());
+            WINDOW_GEOMETRY.with(|g| {
+                if let Err(e) = settings.set_window_geometry(&g.borrow()) {
+                    error!("Failed to save the window geometry: {e}");
+                }
+            });
         });
 
         Self {
@@ -143,10 +146,17 @@ impl EventListener for MainWindow {
         match event {
             AppEvent::Started => self.start(),
             AppEvent::Raised => self.raise(),
-            AppEvent::DrmBlockedDialogShown => self.show_drm_blocked_dialog(),
-            AppEvent::LoginEvent(LoginEvent::LoginCompleted) => self.show(),
-            AppEvent::LoginEvent(LoginEvent::LogoutCompleted) => self.hide(),
+            AppEvent::Core(Event::Error(ErrorKind::DrmBlocked)) => self.show_drm_blocked_dialog(),
             _ => {}
+        }
+        if let Some(session) = event.session() {
+            let ready = session.status == SessionStatus::LoggedIn
+                && crate::app::components::engine_setup::playback_ready(session);
+            if ready && !self.logged_in.get() {
+                self.show();
+            } else if session.became(&SessionStatus::LoggedOut) {
+                self.hide();
+            }
         }
     }
 }

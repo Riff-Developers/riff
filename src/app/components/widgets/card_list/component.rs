@@ -8,13 +8,10 @@ use super::traits::CardListPageModel;
 use super::widget::{changes_playing_card, CardList, PlayingCard};
 use crate::app::components::{labels, CardLayout, CardSize, Component, EventListener, SortOrder};
 use crate::app::models::FilterOption;
-use crate::app::state::LoginEvent;
-use crate::app::{AppEvent, BrowserEvent, Dispatcher};
+use crate::app::state::{SessionStatus, ViewPreferencesChanged};
+use crate::app::{AppEvent, Dispatcher};
 use crate::settings::StateTracker;
 
-// Constants
-
-/// Margin (in pixels) around the card list inside the scrolled window.
 const CARD_LIST_MARGIN: i32 = 12;
 
 pub fn filter_matches_nothing(category: &str, visible_count: usize) -> bool {
@@ -44,10 +41,6 @@ fn load_more_for_filter<M: CardListPageModel>(model: &M, card_list: &CardList) {
     }
 }
 
-/// A unified card list component that handles events and wiring automatically.
-///
-/// Owns the `CardListWidget` (template-based), `CardList`, `CardViewMenu`,
-/// and handles `CardLayoutChanged`/`CardSizeChanged` events internally.
 pub struct CardListComponent<M: CardListPageModel + 'static> {
     model: Rc<M>,
     page_widget: CardListWidget,
@@ -73,17 +66,14 @@ impl<M: CardListPageModel + 'static> CardListComponent<M> {
         card_list.widget().set_margin_top(CARD_LIST_MARGIN);
         card_list.widget().set_margin_bottom(CARD_LIST_MARGIN);
 
-        // Wire card list into template overlay
         page_widget.overlay().set_child(Some(card_list.widget()));
 
-        // Configure status page from model
         let status_page = page_widget.status_page();
         status_page.set_title(&model.empty_title());
         status_page.set_description(Some(&model.empty_description()));
         status_page.set_icon_name(Some(model.empty_icon()));
         status_page.set_visible(false);
 
-        // Infinite scroll
         let card_list_weak = Rc::downgrade(&card_list);
         page_widget.scrolled_window().connect_edge_reached(clone!(
             #[weak]
@@ -157,13 +147,17 @@ impl<M: CardListPageModel + 'static> CardListComponent<M> {
 
 impl<M: CardListPageModel + 'static> EventListener for CardListComponent<M> {
     fn on_event(&mut self, event: &AppEvent) {
+        self.model.apply_event(event);
         match event {
-            AppEvent::LoginEvent(LoginEvent::LoginCompleted) => {
+            _ if event
+                .session()
+                .is_some_and(|s| s.became(&SessionStatus::LoggedIn)) =>
+            {
                 self.card_list.show_placeholders();
                 self.model.refresh();
             }
-            AppEvent::BrowserEvent(
-                BrowserEvent::CardLayoutChanged(_) | BrowserEvent::CardSizeChanged(_),
+            AppEvent::ViewPreferences(
+                ViewPreferencesChanged::CardLayout(_) | ViewPreferencesChanged::CardSize(_),
             ) => {
                 self.card_list.update_layout(self.layout.get());
                 self.card_list.update_size(self.size.get());
@@ -205,11 +199,6 @@ impl<M: CardListPageModel + 'static> Component for CardListComponent<M> {
     }
 }
 
-/// A lightweight card list handler for embedding inside a `DetailsPageComponent`.
-///
-/// Unlike `CardListComponent`, this does NOT own a scrolled window or status page
-/// (the parent detail page provides those). It only manages the `CardList` +
-/// `CardViewMenu` + style event handling. Sort is handled locally by the menu.
 pub struct EmbeddedCardList {
     card_list: Rc<CardList>,
     playing_card: Box<dyn Fn() -> PlayingCard>,
@@ -230,7 +219,6 @@ impl EmbeddedCardList {
         playing_card: impl Fn() -> PlayingCard + 'static,
         dispatcher: Dispatcher,
     ) -> Self {
-        // Apply shared style/size (card list may have been created with defaults)
         card_list.update_layout(layout.get());
         card_list.update_size(size.get());
         card_list.set_playing(playing_card());
@@ -239,7 +227,6 @@ impl EmbeddedCardList {
         let preferred_sort = tracker.load_sort_order(page_id);
         let current_sort = Rc::new(Cell::new(effective_sort(preferred_sort, available_sorts)));
 
-        // Apply initial sort if not default
         if current_sort.get() != SortOrder::RecentlyAdded {
             card_list.set_sort(current_sort.get());
         }
@@ -272,8 +259,8 @@ impl EmbeddedCardList {
 
 impl EventListener for EmbeddedCardList {
     fn on_event(&mut self, event: &AppEvent) {
-        if let AppEvent::BrowserEvent(
-            BrowserEvent::CardLayoutChanged(_) | BrowserEvent::CardSizeChanged(_),
+        if let AppEvent::ViewPreferences(
+            ViewPreferencesChanged::CardLayout(_) | ViewPreferencesChanged::CardSize(_),
         ) = event
         {
             self.card_list.update_layout(self.layout.get());

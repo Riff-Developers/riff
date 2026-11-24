@@ -1,7 +1,3 @@
-// Widget for the playlist detail page.
-// Shows playlist art, track list, and supports inline title editing
-// when the user owns the playlist and selection mode is toggled.
-
 use gtk::prelude::*;
 use libadwaita::prelude::*;
 use std::cell::Cell;
@@ -14,16 +10,15 @@ use crate::app::components::{
     labels, Component, DetailsPageComponent, EventListener, HasHeaderBarModel, PageHeader,
     PlaylistDialog,
 };
-use crate::app::load;
-use crate::app::state::{BrowserEvent, SelectionEvent};
+use crate::app::state::Route;
 use crate::app::{AppEvent, ProvidesApi};
 use riff_api::models::is_resource_url;
+use riff_core::load;
 
 const EDIT_DETAILS_ENTRY: &str = "edit_details";
 
 const COVER_PREVIEW_SIZE: i32 = 160;
 
-/// GTK widget for the playlist detail page.
 pub struct PlaylistDetails {
     model: Rc<PlaylistDetailsModel>,
     component: DetailsPageComponent<PlaylistDetailsModel>,
@@ -152,18 +147,14 @@ impl Component for PlaylistDetails {
 impl EventListener for PlaylistDetails {
     fn on_event(&mut self, event: &AppEvent) {
         self.component.handle_event(event);
-        match event {
-            AppEvent::SelectionEvent(SelectionEvent::SelectionModeChanged(active)) => {
-                self.set_editing(*active);
-            }
-            AppEvent::BrowserEvent(
-                BrowserEvent::PlaylistDetailsLoaded(id)
-                | BrowserEvent::PlaylistTracksAppended(id)
-                | BrowserEvent::PlaylistTracksRemoved(id),
-            ) if *id == self.model.id => {
-                self.add_owner_menu();
-            }
-            _ => {}
+        if let Some(selection) = event.selection().filter(|s| s.mode_changed()) {
+            self.set_editing(selection.active);
+        }
+        if event
+            .page_loaded(&Route::Playlist(self.model.id.clone()))
+            .is_some()
+        {
+            self.add_owner_menu();
         }
         self.broadcast_event(event);
     }

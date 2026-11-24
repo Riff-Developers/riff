@@ -1,12 +1,11 @@
-//! The provider contract.
-//!
-//! [`MusicProvider`] is a generic music vendor interface the
-//! [`crate::service::ApiService`] depends on.
-
 use async_trait::async_trait;
 
 use crate::error::DomainError;
 use crate::models::*;
+use crate::remote::{
+    ProviderCapabilities, RemoteCluster, RemoteCommand, RemoteEndpoint, RemotePush,
+    TransferPlayback,
+};
 
 #[async_trait]
 pub trait MusicProvider: Send + Sync + 'static {
@@ -130,27 +129,69 @@ pub trait MusicProvider: Send + Sync + 'static {
         limit: usize,
     ) -> Result<SearchResults, DomainError>;
 
-    async fn get_devices(&self) -> Result<Vec<Device>, DomainError>;
-    async fn get_player_queue(&self) -> Result<Queue, DomainError>;
-    async fn get_player_state(&self) -> Result<PlayerState, DomainError>;
-    async fn player_resume(&self, device_id: &str) -> Result<(), DomainError>;
-    async fn player_play_in_context(
+    /// Tracks by id, at most 50 at a time, each with the id it was asked
+    /// for: a track can come back as a regional copy with an id of its own.
+    async fn get_tracks(&self, ids: &[String]) -> Result<Vec<(String, Track)>, DomainError>;
+
+    /// What the provider can do beyond its catalog.
+    fn capabilities(&self) -> ProviderCapabilities;
+
+    /// How the provider's own players name what they play.
+    fn uris(&self) -> crate::remote::ContentUris {
+        crate::remote::ContentUris::none()
+    }
+
+    async fn remote_endpoint(&self) -> Result<RemoteEndpoint, DomainError> {
+        Err(DomainError::Unsupported("remote devices"))
+    }
+    fn parse_remote_push(&self, _text: &str) -> RemotePush {
+        RemotePush::Other
+    }
+    /// The keepalive to send over the live connection.
+    fn remote_keepalive(&self) -> &'static str {
+        ""
+    }
+    async fn remote_register(
         &self,
-        device_id: &str,
-        context_uri: &str,
-        offset: usize,
-    ) -> Result<(), DomainError>;
-    async fn player_play_uris(
+        _observer_id: &str,
+        _connection_id: &str,
+    ) -> Result<RemoteCluster, DomainError> {
+        Err(DomainError::Unsupported("remote devices"))
+    }
+    async fn remote_unregister(
         &self,
-        device_id: &str,
-        uris: Vec<String>,
-        offset: usize,
-    ) -> Result<(), DomainError>;
-    async fn player_pause(&self, device_id: &str) -> Result<(), DomainError>;
-    async fn player_seek(&self, device_id: &str, position_ms: u32) -> Result<(), DomainError>;
-    async fn player_repeat(&self, device_id: &str, mode: RepeatMode) -> Result<(), DomainError>;
-    async fn player_shuffle(&self, device_id: &str, state: bool) -> Result<(), DomainError>;
-    async fn player_volume(&self, device_id: &str, volume_percent: u8) -> Result<(), DomainError>;
+        _observer_id: &str,
+        _connection_id: &str,
+    ) -> Result<(), DomainError> {
+        Err(DomainError::Unsupported("remote devices"))
+    }
+    async fn remote_command(
+        &self,
+        _from: &str,
+        _to: &str,
+        _connection_id: &str,
+        _command: RemoteCommand,
+    ) -> Result<(), DomainError> {
+        Err(DomainError::Unsupported("remote devices"))
+    }
+    async fn remote_transfer(
+        &self,
+        _from: &str,
+        _to: &str,
+        _connection_id: &str,
+        _playback: TransferPlayback,
+    ) -> Result<(), DomainError> {
+        Err(DomainError::Unsupported("remote devices"))
+    }
+    async fn remote_volume(
+        &self,
+        _from: &str,
+        _to: &str,
+        _connection_id: &str,
+        _percent: u8,
+    ) -> Result<(), DomainError> {
+        Err(DomainError::Unsupported("remote devices"))
+    }
 
     /// Drop any cached auth configuration (e.g. after a 401).
     fn invalidate_config(&self);

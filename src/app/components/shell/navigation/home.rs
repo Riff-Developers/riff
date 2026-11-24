@@ -3,7 +3,7 @@ use gtk::prelude::*;
 use crate::app::components::navigation_panel::NavigationPanelDestination;
 use crate::app::components::{Component, EventListener, ScreenFactory};
 use crate::app::state::{HomePage, Route, Transition};
-use crate::app::{AppEvent, BrowserEvent};
+use crate::app::AppEvent;
 
 use super::page_stack::{hide_pages_not_showing, show_page};
 
@@ -62,10 +62,10 @@ impl Component for HomePane {
 
 impl EventListener for HomePane {
     fn on_event(&mut self, event: &AppEvent) {
-        if let AppEvent::BrowserEvent(BrowserEvent::NavigationChanged(Transition {
+        if let Some(Transition {
             to: Route::Home(page),
             ..
-        })) = event
+        }) = event.transition()
         {
             show_page(&self.stack, page.id());
         }

@@ -1,19 +1,13 @@
-// The app consumes the provider-neutral data-layer models directly. The leaf
-// catalog entities (`Track`, `Album`, `Playlist`, `Artist`, ...) are
-// re-exported from `riff_api::models` so the rest of the app can refer to them
-// as `crate::app::models::*`.
 pub use riff_api::models::{
     Album, AlbumType, Artist, ArtistRef, ContentRating, Device, DeviceKind, ImageSet, Page,
-    PlayerState, Playlist, RepeatMode, ResourceId, SearchResults, Track, User,
+    Playlist, RepeatMode, ResourceId, SearchResults, SearchType, Track,
 };
+pub use riff_core::library::PlaylistSummary;
 pub use riff_core::play_queue::{PageRequest, SongsSource};
 
-// Only the `#[cfg(test)]` fixtures below name `Provider`; keep its import
-// test-scoped so non-test builds don't see an unused re-export.
 #[cfg(test)]
 use riff_api::models::Provider;
 
-/// UI helper methods for [`Track`].
 pub trait TrackExt {
     fn artists_name(&self) -> String;
     fn is_explicit(&self) -> bool;
@@ -33,7 +27,6 @@ impl TrackExt for Track {
     }
 }
 
-/// UI helper methods for [`Album`].
 pub trait AlbumExt {
     fn artists_name(&self) -> String;
     fn release_date_string(&self) -> Option<String>;
@@ -68,39 +61,6 @@ impl AlbumExt for Album {
             AlbumType::Other(s) => s.clone(),
         })
     }
-}
-
-// "Something"Ref models (UserRef, ArtistRef, AlbumRef) are re-exported from
-// the data layer above.
-
-/// The category a scoped ("sub") search page searches within.
-///
-/// Selecting a filter on the main search page opens a dedicated page scoped to
-/// one of these categories, using the Spotify search API restricted to the
-/// matching `type`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SearchType {
-    Artists,
-    Albums,
-    Playlists,
-    Tracks,
-}
-
-impl From<SearchType> for riff_api::models::SearchType {
-    fn from(kind: SearchType) -> Self {
-        match kind {
-            SearchType::Artists => Self::Artist,
-            SearchType::Albums => Self::Album,
-            SearchType::Playlists => Self::Playlist,
-            SearchType::Tracks => Self::Track,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct PlaylistSummary {
-    pub id: String,
-    pub title: String,
 }
 
 #[derive(Copy, Clone, Default, PartialEq, Eq)]

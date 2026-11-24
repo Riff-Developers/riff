@@ -40,8 +40,8 @@ impl Default for Navigator {
 }
 
 impl Navigator {
-    pub const DEFAULT_CAPACITY: usize = 50;
-    pub const DEFAULT_LIVE_LIMIT: usize = 6;
+    const DEFAULT_CAPACITY: usize = 50;
+    const DEFAULT_LIVE_LIMIT: usize = 6;
 
     pub fn new(capacity: usize, live_limit: usize) -> Self {
         let start = Entry {
@@ -78,11 +78,11 @@ impl Navigator {
     }
 
     pub fn back_entries(&self) -> impl Iterator<Item = &Entry> {
-        self.history.back_entries().map(|(_, e)| e)
+        self.history.back_entries()
     }
 
     pub fn forward_entries(&self) -> impl Iterator<Item = &Entry> {
-        self.history.forward_entries().map(|(_, e)| e)
+        self.history.forward_entries()
     }
 
     pub fn navigate(&mut self, route: Route) -> Option<Transition> {
@@ -147,11 +147,10 @@ impl Navigator {
     }
 
     pub fn live_routes(&self) -> Vec<Route> {
-        let entries = self.history.entries();
-        let cursor = self.history.cursor();
-        let behind = entries[..cursor].iter().rev();
-        let ahead = entries[cursor + 1..].iter();
-        let nearest = std::iter::once(&entries[cursor]).chain(interleave(behind, ahead));
+        let nearest = std::iter::once(self.current()).chain(interleave(
+            self.history.back_entries(),
+            self.history.forward_entries(),
+        ));
 
         let mut live = vec![Route::Home(HomePage::default())];
         let mut others = 0;

@@ -1,22 +1,14 @@
-// Widget for the "Now Playing" page.
-// The current track in the header, then the queue, or a placeholder when
-// nothing plays.
-
 use gettextrs::gettext;
 use gtk::prelude::*;
 use std::rc::Rc;
 
 use super::NowPlayingModel;
 use crate::app::components::{
-    Component, DetailsPageComponent, DeviceSelector, DeviceSelectorWidget, EventListener,
-    HasHeaderBarModel, PageHeader, QueueList,
+    Component, DetailsPageComponent, EventListener, HasHeaderBarModel, PageHeader, QueueList,
 };
-use crate::app::state::PlaybackEvent;
+use crate::app::state::PlaybackFields;
 use crate::app::AppEvent;
-use riff_config::feature_flags::FeatureFlag;
-use riff_config::settings::SETTINGS;
 
-/// GTK widget for the now-playing/queue detail page.
 pub struct NowPlaying {
     stack: gtk::Stack,
     component: DetailsPageComponent<NowPlayingModel>,
@@ -30,21 +22,8 @@ impl NowPlaying {
             DetailsPageComponent::new(model.clone(), model.to_headerbar_model(), header);
         let queue_list = QueueList::new(model.queue_list_model());
         component.append_content(queue_list.widget());
-        // Once the list is in the page's ScrolledWindow
         queue_list.connect_scrolling();
         component.add_child(Box::new(queue_list));
-
-        let ds_widget: DeviceSelectorWidget = glib::Object::new();
-        gio::Settings::new(SETTINGS)
-            .bind(FeatureFlag::DeviceSelector.key(), &ds_widget, "visible")
-            .get()
-            .build();
-        component.header().add_end(&ds_widget);
-        let device_selector = Box::new(DeviceSelector::new(
-            ds_widget,
-            model.device_selector_model(),
-        ));
-        component.add_child(device_selector);
 
         let status_page = libadwaita::StatusPage::new();
         status_page.set_title(&gettext("No Track Playing"));
@@ -90,12 +69,7 @@ impl Component for NowPlaying {
 impl EventListener for NowPlaying {
     fn on_event(&mut self, event: &AppEvent) {
         self.component.handle_event(event);
-        if let AppEvent::PlaybackEvent(
-            PlaybackEvent::TrackChanged(_)
-            | PlaybackEvent::PlaybackStopped
-            | PlaybackEvent::PlaylistChanged,
-        ) = event
-        {
+        if event.queue_changed() || event.playback_changed(PlaybackFields::TRACK) {
             self.update_empty_state();
         }
         self.broadcast_event(event);

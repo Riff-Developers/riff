@@ -97,7 +97,6 @@ impl ListRangeUpdate {
         // range [s, e] affected by first update
         let ra0 = Range::of(p0, p0 + r0 - 1);
 
-        // ...second update, but only the range affecting existing elements
         let ra1 = {
             let s1 = i32::max(p0 + a0, p1);
             let e1 = i32::max(s1 - 1, p1 + r1 - 1);
@@ -117,14 +116,6 @@ impl ListRangeUpdate {
     }
 }
 
-// A list of songs that supports
-// - batch loading (with non contiguous batches if songs are accessed in random order)
-// - O(1) time access to a song by its id
-// - manually adding content (not batched), when managing a queue for instance
-// - tracking the affected range after a mutation
-//
-// Note: the mutated ranges are given in terms of LOADED tracks. The theoretical size of the list is not accounted for.
-// This is to ease the work of updating the UI: we want to know what loaded/visible elements have moved around.
 #[derive(Clone, Debug)]
 pub struct SongList {
     total_loaded: usize,
@@ -132,7 +123,6 @@ pub struct SongList {
     batch_size: usize,
     last_batch_key: usize,
     complete: bool,
-    // Why not a Vec? We could have batch 1, 2, NOT 3, then 4
     batches: HashMap<usize, Vec<SongModel>>,
     indexed_songs: HashMap<String, SongModel>,
 }
@@ -167,7 +157,6 @@ impl SongList {
         self.total_loaded
     }
 
-    // How many songs are loaded, up to a given batch index
     fn estimated_len(&self, up_to_batch_index: usize) -> usize {
         let batches = &self.batches;
         let batch_size = self.batch_size;
@@ -177,12 +166,10 @@ impl SongList {
         batch_size * batch_count
     }
 
-    // The theoretical len of the collection if we had all track
     pub fn len(&self) -> usize {
         self.total.unwrap_or(self.total_loaded)
     }
 
-    // True if any batch request is still loading.
     pub fn has_gap(&self) -> bool {
         (0..self.last_batch_key).any(|i| !self.batches.contains_key(&i))
     }
@@ -194,7 +181,6 @@ impl SongList {
             .skip(i % batch_size)
     }
 
-    // Find the position of a song in the list
     pub fn find_index(&self, song_id: &str) -> Option<usize> {
         self.iter_from(0)
             .find(|(_, song)| song.description().rri.id == song_id)
@@ -223,7 +209,6 @@ impl SongList {
             .get(&index)
             .map(|b| b.len() % batch_size)
             .unwrap_or(0);
-        // If there's no space in the last batch, we insert a new one
         if count == 0 {
             batches.insert(batches.len(), vec![song]);
         } else {
@@ -270,7 +255,6 @@ impl SongList {
             .cloned()
             .collect();
         self.repack(kept);
-        // Lazy computation of the affected range, basically assume everything has changed
         ListRangeUpdate(0, len as i32, self.total_loaded as i32)
     }
 
@@ -280,15 +264,12 @@ impl SongList {
 
     pub fn append_models(&mut self, songs: Vec<SongModel>) -> ListRangeUpdate {
         let songs_len = songs.len();
-        // How many loaded/visible songs so far
         let insertion_start = self.total_loaded;
-        // Close any gap first
         if self.has_gap() || self.last_batch_key + 1 != self.batches.len() {
             let existing: Vec<SongModel> = self.iter().cloned().collect();
             self.repack(existing);
         }
         self.total_loaded = self.total_loaded.saturating_add(songs_len);
-        // A directly-appended list is a fully-known, non-paginated collection.
         self.complete = true;
         for song in songs {
             self.index_song(&song);
@@ -296,6 +277,40 @@ impl SongList {
         }
         self.last_batch_key = self.batches.len().saturating_sub(1);
         ListRangeUpdate::inserted(insertion_start, songs_len)
+    }
+
+    pub fn sync(
+        &mut self,
+        tracks: &[Track],
+        total: Option<usize>,
+        complete: bool,
+    ) -> Option<ListRangeUpdate> {
+        let old: Vec<SongModel> = self.iter().cloned().collect();
+        let same = |(model, track): (&SongModel, &Track)| model.get_id() == track.rri.id;
+        let prefix = old.iter().zip(tracks).take_while(|&p| same(p)).count();
+        let suffix = old[prefix..]
+            .iter()
+            .rev()
+            .zip(tracks[prefix..].iter().rev())
+            .take_while(|&p| same(p))
+            .count();
+        let removed = old.len() - prefix - suffix;
+        let added = tracks.len() - prefix - suffix;
+        self.total = total;
+        self.complete = complete;
+        if removed == 0 && added == 0 {
+            return None;
+        }
+        let mut models = old[..prefix].to_vec();
+        models.extend(
+            tracks[prefix..tracks.len() - suffix]
+                .iter()
+                .cloned()
+                .map(SongModel::new),
+        );
+        models.extend_from_slice(&old[old.len() - suffix..]);
+        self.repack(models);
+        Some(ListRangeUpdate(prefix as i32, removed as i32, added as i32))
     }
 
     pub fn replace_models(&mut self, songs: Vec<SongModel>) -> ListRangeUpdate {
@@ -310,19 +325,13 @@ impl SongList {
         let songs_len = songs.len();
         let insertion_start = 0;
 
-        // Prepending also requires redoing all the batches
         let mut all: Vec<SongModel> = songs.into_iter().map(SongModel::new).collect();
         all.extend(self.iter().cloned());
         self.repack(all);
 
-        // But it's a bit easier to computer the visibly affected range :)
         ListRangeUpdate::inserted(insertion_start, songs_len)
     }
 
-    // Adding a batch is easy, might only require a resize
-    // Add a loaded page. Pages are assumed aligned to this list's batch size
-    // (every fetch uses the same limit), so the page drops in at
-    // `offset / batch_size`.
     pub fn add(&mut self, batch: Page<Track>) -> Option<ListRangeUpdate> {
         let Page {
             items,
@@ -334,8 +343,6 @@ impl SongList {
 
         let insertion_start = self.estimated_len(index);
         let len = items.len();
-        // A page shorter than the batch size (including an empty trailing page)
-        // means we've reached the end of the collection.
         if len < self.batch_size {
             self.complete = true;
         }
@@ -347,7 +354,6 @@ impl SongList {
             self.index_song(song);
         }
 
-        // The same page loaded twice: its rows are replaced, not added to
         let replaced = match self.batches.insert(index, songs) {
             Some(old) => {
                 self.total_loaded -= old.len();
@@ -386,7 +392,6 @@ impl SongList {
         Some(ListRangeUpdate::updated(a).merge(ListRangeUpdate::updated(b)))
     }
 
-    // Get the song at i (if the index is valid AND has been loaded)
     pub fn index(&self, i: usize) -> Option<&SongModel> {
         let batch_size = self.batch_size;
         let batch_id = i / batch_size;
@@ -395,18 +400,15 @@ impl SongList {
             .and_then(|batch| batch.get(i % batch_size))
     }
 
-    // Get the i-th loaded song. VERY different!
     pub fn index_continuous(&self, i: usize) -> Option<&SongModel> {
         let batch_size = self.batch_size;
         let bi = i / batch_size;
         let batch = (0..=self.last_batch_key)
-            // Skip missing/not loaded batches
             .filter_map(move |i| self.batches.get(&i))
             .nth(bi)?;
         batch.get(i % batch_size)
     }
 
-    // Return the request needed to load the song at index i (if not loaded yet)
     pub fn needed_batch_for(&self, i: usize) -> Option<PageRequest> {
         let batch_size = self.batch_size;
         let batch_id = i / batch_size;
@@ -420,7 +422,6 @@ impl SongList {
         }
     }
 
-    // Get the full song batch that contains i
     pub fn song_batch_for(&self, i: usize) -> Option<Page<Track>> {
         let batch_size = self.batch_size;
         let batch_id = i / batch_size;
@@ -471,51 +472,33 @@ mod tests {
 
     #[test]
     fn test_merge_range() {
-        // [0, 1, 2, 3, 4, 5]
         let change1 = ListRangeUpdate(0, 4, 2);
-        // [x, x, 4, 5]
         let change2 = ListRangeUpdate(1, 1, 2);
-        // [x, y, y, 4, 5]
         assert_eq!(change1.merge(change2), ListRangeUpdate(0, 4, 3));
         assert_eq!(change2.merge(change1), ListRangeUpdate(0, 4, 3));
 
-        // [0, 1, 2, 3, 4, 5, 6]
         let change1 = ListRangeUpdate(0, 2, 3);
-        // [x, x, x, 2, 3, 4, 5, 6]
         let change2 = ListRangeUpdate(4, 1, 1);
-        // [x, x, x, 2, y, 4, 5, 6]
         assert_eq!(change1.merge(change2), ListRangeUpdate(0, 4, 5));
         assert_eq!(change2.merge(change1), ListRangeUpdate(0, 4, 5));
 
-        // [0, 1, 2, 3, 4, 5, 6]
         let change1 = ListRangeUpdate(0, 3, 2);
-        // [x, x, 3, 4, 5, 6]
         let change2 = ListRangeUpdate(4, 1, 1);
-        // [x, x, 3, 4, y, 6]
         assert_eq!(change1.merge(change2), ListRangeUpdate(0, 6, 5));
         assert_eq!(change2.merge(change1), ListRangeUpdate(0, 6, 5));
 
-        // [0, 1, 2, 3, 4, 5]
         let change1 = ListRangeUpdate(0, 4, 2);
-        // [x, x, 4, 5]
         let change2 = ListRangeUpdate(1, 1, 1);
-        // [x, y, 4, 5]
         assert_eq!(change1.merge(change2), ListRangeUpdate(0, 4, 2));
         assert_eq!(change2.merge(change1), ListRangeUpdate(0, 4, 2));
 
-        // [0, 1, 2, 3, 4, 5]
         let change1 = ListRangeUpdate(0, 4, 2);
-        // [x, x, 4, 5]
         let change2 = ListRangeUpdate(0, 4, 2);
-        // [y, y]
         assert_eq!(change1.merge(change2), ListRangeUpdate(0, 6, 2));
         assert_eq!(change2.merge(change1), ListRangeUpdate(0, 6, 2));
 
-        // []
         let change1 = ListRangeUpdate(0, 0, 2);
-        // [x, x]
         let change2 = ListRangeUpdate(2, 0, 2);
-        // [x, x, y, y]
         assert_eq!(change1.merge(change2), ListRangeUpdate(0, 0, 4));
         assert_eq!(change2.merge(change1), ListRangeUpdate(0, 0, 4));
 
@@ -635,8 +618,6 @@ mod tests {
 
         list.remove(&["song0".to_string()]);
 
-        // `get` must not return songs that were removed, otherwise callers
-        // relying on membership (e.g. liked-song checks) get stale results.
         assert!(list.get("song0").is_none());
         assert!(list.get("song1").is_some());
     }
@@ -675,12 +656,12 @@ mod tests {
         let mut list = SongList::new_sized(10);
         list.append(vec![song("song0"), song("song1"), song("song2")]);
 
-        list.swap(0, 3); // should be a no-op
-        list.swap(2, 3); // should be a no-op
+        list.swap(0, 3);
+        list.swap(2, 3);
         list.swap(0, 2);
         list.swap(0, 1);
-        list.swap(2, 2); // should be no-op
-        list.swap(2, 3); // should be no-op
+        list.swap(2, 2);
+        list.swap(2, 3);
 
         let mut list_iter = list.iter();
         assert_eq!(list_iter.next().unwrap().description().rri.id, "song1");
@@ -725,7 +706,6 @@ mod tests {
             total: Some(1000),
             next_cursor: None,
         });
-        // A stale/racing response reporting a smaller total must not shrink len().
         list.add(Page {
             items: (50..100).map(|i| song(&format!("song{i}"))).collect(),
             offset: Some(50),
@@ -740,7 +720,7 @@ mod tests {
     fn test_has_gap_detects_missing_batch() {
         let mut list = SongList::new_sized(2);
         list.add(batch(0));
-        list.add(batch(2)); // batch 1 never arrived
+        list.add(batch(2));
 
         assert!(list.has_gap());
     }
@@ -758,7 +738,6 @@ mod tests {
     fn test_is_complete_false_while_gap_exists() {
         let mut list = SongList::new_sized(2);
         list.add(batch(0));
-        // Short page at the tail marks `complete`, but a gap remains behind it.
         list.add(Page {
             items: vec![song("song4")],
             offset: Some(4),
@@ -779,7 +758,7 @@ mod tests {
             total: None,
             next_cursor: None,
         });
-        list.add(batch(1)); // fills the gap
+        list.add(batch(1));
 
         assert!(list.is_complete());
     }
@@ -818,5 +797,37 @@ mod tests {
         assert_eq!(list.index_continuous(0), Some(&b));
         assert_eq!(list.index_continuous(1), Some(&a));
         assert_eq!(list.index_continuous(2), Some(&b));
+    }
+
+    #[test]
+    fn test_sync_keeps_the_rows_that_did_not_change() {
+        let mut list = SongList::new_sized(2);
+        let ids = |list: &SongList| list.iter().map(|s| s.get_id()).collect::<Vec<_>>();
+        assert_eq!(
+            list.sync(&[song("a"), song("b"), song("c")], None, false),
+            Some(ListRangeUpdate(0, 0, 3))
+        );
+        let kept_first = list.index(0).cloned().unwrap();
+        let kept_last = list.index(2).cloned().unwrap();
+
+        assert_eq!(
+            list.sync(&[song("a"), song("b"), song("c"), song("d")], Some(4), true),
+            Some(ListRangeUpdate(3, 0, 1))
+        );
+        assert!(list.is_complete());
+        assert_eq!(list.len(), 4);
+
+        assert_eq!(
+            list.sync(&[song("a"), song("c"), song("d")], Some(3), true),
+            Some(ListRangeUpdate(1, 1, 0))
+        );
+        assert_eq!(ids(&list), ["a", "c", "d"]);
+        assert_eq!(list.index(0), Some(&kept_first));
+        assert_eq!(list.index(1), Some(&kept_last));
+
+        assert_eq!(
+            list.sync(&[song("a"), song("c"), song("d")], Some(3), true),
+            None
+        );
     }
 }

@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
 use crate::app::components::display_add_css_provider;
+use riff_core::library::PlaylistDetails;
 
 #[derive(Clone)]
 pub struct Saved(Arc<Mutex<Option<oneshot::Sender<()>>>>);
@@ -32,6 +33,23 @@ pub struct PlaylistForm {
     pub public: bool,
     pub public_changed: bool,
     pub cover: Option<Vec<u8>>,
+}
+
+impl PlaylistForm {
+    pub fn new_details(&self) -> PlaylistDetails {
+        PlaylistDetails {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            public: Some(self.public),
+        }
+    }
+
+    pub fn changed_details(&self) -> PlaylistDetails {
+        PlaylistDetails {
+            public: self.public_changed.then_some(self.public),
+            ..self.new_details()
+        }
+    }
 }
 
 mod imp {

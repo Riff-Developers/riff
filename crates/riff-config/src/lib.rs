@@ -1,12 +1,16 @@
 //! User and app configuration for the Riff workspace.
 //!
-//! This crate is the single source of truth for configuration referenced
-//! across crates: app constants we tune during development, and the code that
-//! reads and exposes user settings stored in GSettings
-//! (`data/dev.diegovsky.Riff.gschema.xml`). Each module covers one area, so
-//! which subsystem owns a value is obvious and unrelated configuration does
-//! not collect into a single flat list.
+//! This crate is the single source of truth for configuration, settings,
+//! and feature flags.
+
+#[cfg(feature = "gio")]
+#[macro_use]
+extern crate log;
 
 pub mod api;
-pub mod feature_flags;
-pub mod settings;
+pub mod feature_flag;
+pub mod setting;
+
+#[cfg(feature = "gio")]
+pub use setting::{SetResult, SettingsStore};
+pub use setting::{Setting, SettingSet, SettingsChanged, SettingsSupport};

@@ -82,12 +82,6 @@
       <default>false</default>
       <summary>Skip tracks marked as explicit</summary>
     </key>
-    <key name="shuffle-separation" type="u">
-      <range min="1" max="10"/>
-      <default>2</default>
-      <summary>Songs between two plays of a song when shuffling</summary>
-      <description>With shuffle and repeat on, the minimum number of other songs that play before a song plays again.</description>
-    </key>
     <key name='alsa-device' type='s'>
       <default>'default'</default>
       <summary>Alsa device (if audio backend is 'alsa')</summary>
@@ -204,23 +198,6 @@
       <default>0.7</default>
       <summary>The playback volume</summary>
     </key>
-    <key name='shuffle' type='b'>
-      <default>false</default>
-      <summary>The playback shuffle state</summary>
-    </key>
-     <key name="repeat" type="s">
-      <choices>
-        <choice value='song'/>
-        <choice value='playlist'/>
-        <choice value='none'/>
-      </choices>
-      <summary>The playback repeat mode</summary>
-      <default>'none'</default>
-    </key>
-    <key name="feature-device-selector" type="b">
-      <default>false</default>
-      <summary>Enable the device selector in the Now Playing headerbar</summary>
-    </key>
     <key name="feature-normalisation" type="b">
       <default>false</default>
       <summary>Show audio normalisation settings for fine-tuning loudness between tracks</summary>
@@ -228,6 +205,14 @@
     <key name="feature-pinned-objects" type="b">
       <default>false</default>
       <summary>Enable pinning objects to the navigation panel</summary>
+    </key>
+    <key name="playback-engine" type="s">
+      <choices>
+        <choice value='librespot'/>
+        <choice value='soloist'/>
+      </choices>
+      <default>'librespot'</default>
+      <summary>What plays on this computer, picked when logging in</summary>
     </key>
     <key name="queue-side-panel" type="b">
       <default>false</default>
@@ -287,6 +272,10 @@
     <key name='drm-verified-user' type='s'>
       <default>''</default>
       <summary>Spotify user id known to play tracks, used to skip PlayPlay DRM detection across restarts.</summary>
+    </key>
+    <key name="soloist-paired" type="b">
+      <default>false</default>
+      <summary>Whether the player on this computer has been paired</summary>
     </key>
     <key name="memory-cache-size-mb" type="u">
       <range min="1" max="1024"/>

@@ -14,18 +14,17 @@ use crate::app::components::{
     RowOptions, TrackRow, PLAYLIST_PICKER_MENU_ID, ROW_HEIGHT_PX, SELECTABLE_LIST_CLASS,
 };
 use crate::app::models::{SongListModel, SongModel, SongState, Track, TrackExt};
-use crate::app::state::{BrowserEvent, PlaybackEvent, SelectionEvent, SelectionState};
-use crate::app::{AppAction, AppEvent, ProvidesApi};
-use riff_config::feature_flags::{is_enabled, FeatureFlag};
+use crate::app::state::{
+    Event, ItemId, LibraryFields, PageFields, PlayContext, PlaybackFields, SavedChanged,
+    SelectionState,
+};
+use crate::app::{AppEvent, ProvidesApi};
+use riff_config::feature_flag::{is_enabled, FeatureFlag};
 
 const SKELETON_ROW_COUNT: usize = 10;
 
-/// How many rows a ListView keeps widgets for around its anchor (GTK's
-/// `GTK_LIST_VIEW_MAX_LIST_ITEMS`); rows outside that window render blank.
 const GTK_MAX_ROW_WIDGETS: u32 = 200;
 
-/// How far, in rows, the viewport can move before the list is re-anchored.
-/// Must stay under GTK_MAX_ROW_WIDGETS / 2.
 const REANCHOR_EVERY_ROWS: u32 = 50;
 
 pub const REMOVE_FROM_PLAYLIST_ACTION: &str = "remove_from_playlist";
@@ -144,6 +143,10 @@ pub fn build_song_menu(
 }
 
 pub trait TrackListModel: ProvidesApi {
+    fn apply_event(&self, _event: &AppEvent) {}
+
+    fn update_liked(&self, _event: &AppEvent) {}
+
     fn is_paused(&self) -> bool;
 
     fn song_list_model(&self) -> SongListModel;
@@ -152,7 +155,7 @@ pub trait TrackListModel: ProvidesApi {
 
     fn play_song_at(&self, pos: usize, id: &str);
 
-    fn context_actions(&self, _pos: usize) -> Option<Vec<AppAction>> {
+    fn play_context(&self) -> Option<PlayContext> {
         None
     }
 
@@ -284,6 +287,8 @@ pub trait TrackListModel: ProvidesApi {
         false
     }
 
+    fn drag_started(&self, _key: &str) {}
+
     fn drop_row(&self, _key: &str, _target: &str, _after: bool) {}
 }
 
@@ -326,8 +331,6 @@ fn disc_header_text(disc: u32) -> String {
     labels::fill(gettextrs::gettext("Disc {}"), &[&disc.to_string()])
 }
 
-/// Disc edges (rounded card corners) are part of the entry so a change in
-/// them rebinds the row.
 #[derive(Clone, PartialEq)]
 enum ListEntry {
     Header {
@@ -357,8 +360,6 @@ struct Projection {
     show_disc_headers: bool,
     show_skeleton: bool,
     positions: Vec<Option<usize>>,
-    /// The wrapper object for each entry, keyed by (entry, occurrence), kept
-    /// across rebuilds so unchanged rows keep their widgets.
     wrappers: HashMap<(String, usize), glib::BoxedAnyObject>,
     hides_row: Option<RowFilter>,
 }
@@ -467,8 +468,6 @@ where
             ..Default::default()
         }));
         projection.borrow_mut().rebuild(&songs, &store);
-        // Synchronous, like SongListModel's own change notification: a
-        // deferred rebuild could let the ListView see a torn model.
         songs.connect_items_changed(clone!(
             #[weak]
             store,
@@ -488,8 +487,6 @@ where
             show_album: model.show_album_column(),
         };
         let factory = gtk::SignalListItemFactory::new();
-        // Selection is the app's own (NoSelection); a selectable item makes
-        // GTK select it on hover, which can crash on a stale row widget.
         factory.connect_setup(|_, item| {
             item.downcast_ref::<gtk::ListItem>()
                 .unwrap()
@@ -695,7 +692,6 @@ where
             scrolled_window.child().as_ref() == Some(self.listview.upcast_ref::<gtk::Widget>());
         let listview = self.listview.downgrade();
         let content = scrolled_content(&scrolled_window).map(|c| c.downgrade());
-        // The viewport-center row the anchor was last set for.
         let anchored_center = Cell::new(0u32);
         let follow = Rc::new(move |adj: &gtk::Adjustment, force: bool| {
             if direct_child {
@@ -717,8 +713,6 @@ where
             }
         });
 
-        // GTK re-anchors on its own when focus moves to a row (click or
-        // keyboard), so restore the centered anchor once it's done.
         let refollow = {
             let follow = Rc::clone(&follow);
 
@@ -751,7 +745,6 @@ where
             follow(adj, false);
 
             let songs = model.song_list_model();
-            // Start loading one page height before the bottom.
             let prefetch_margin = adj.page_size().max(1.0);
             if should_load_more(
                 adj.value() + adj.page_size(),
@@ -777,7 +770,6 @@ where
                 move |adj, _| check(adj)
             ),
         );
-        // The content may already be shorter than the viewport.
         check(&adj);
     }
 }
@@ -944,50 +936,44 @@ impl SongModel {
     }
 }
 
+fn loads_tracks(event: &AppEvent) -> bool {
+    matches!(event, AppEvent::PageLoaded(loaded) if loaded.changed.contains(PageFields::TRACKS))
+}
+
+fn likes_changed(event: &AppEvent) -> bool {
+    matches!(
+        event,
+        AppEvent::Core(Event::Saved(SavedChanged {
+            item: ItemId::Tracks(_),
+            ..
+        }))
+    )
+}
+
 impl<Model> EventListener for TrackList<Model>
 where
     Model: TrackListModel + 'static,
 {
     fn on_event(&mut self, event: &AppEvent) {
-        match event {
-            AppEvent::PlaybackEvent(
-                PlaybackEvent::TrackChanged(_) | PlaybackEvent::PlaybackStopped,
-            ) => {
-                self.update_paused();
-                self.update_song_states(true);
-            }
-            AppEvent::PlaybackEvent(
-                PlaybackEvent::PlaybackResumed | PlaybackEvent::PlaybackPaused,
-            ) => {
-                self.update_paused();
-            }
-            AppEvent::SelectionEvent(SelectionEvent::SelectionModeChanged(_)) => {
-                self.update_selection_mode();
-                self.update_song_states(true);
-            }
-            AppEvent::SelectionEvent(SelectionEvent::SelectionChanged)
-            | AppEvent::BrowserEvent(
-                BrowserEvent::SavedTracksUpdated | BrowserEvent::PinnedPlaylistsUpdated,
-            ) => {
-                self.update_song_states(true);
-            }
-            // No autoscroll: these fire during pagination, and scrolling
-            // would trigger more loading.
-            AppEvent::PlaybackEvent(
-                PlaybackEvent::PlaylistChanged | PlaybackEvent::SkipExplicitChanged(_),
-            )
-            | AppEvent::BrowserEvent(
-                BrowserEvent::AlbumDetailsLoaded(_)
-                | BrowserEvent::AlbumTracksAppended(_)
-                | BrowserEvent::PlaylistDetailsLoaded(_)
-                | BrowserEvent::PlaylistTracksAppended(_)
-                | BrowserEvent::PlaylistTracksRemoved(_)
-                | BrowserEvent::ArtistDetailsUpdated(_)
-                | BrowserEvent::UserDetailsUpdated(_),
-            ) => {
-                self.update_song_states(false);
-            }
-            _ => {}
+        self.model.update_liked(event);
+        self.model.apply_event(event);
+        if event.playback_changed(PlaybackFields::STATUS | PlaybackFields::TRACK) {
+            self.update_paused();
+        }
+        if event.selection().is_some_and(|s| s.mode_changed()) {
+            self.update_selection_mode();
+        }
+        if event.playback_changed(PlaybackFields::TRACK)
+            || event.selection().is_some()
+            || likes_changed(event)
+            || event.library_changed(LibraryFields::PINS)
+        {
+            self.update_song_states(true);
+        } else if event.queue_changed()
+            || event.playback_changed(PlaybackFields::SKIP_EXPLICIT)
+            || loads_tracks(event)
+        {
+            self.update_song_states(false);
         }
     }
 }
@@ -1049,8 +1035,6 @@ mod tests {
             Some(Box::new(self.selection.borrow()))
         }
     }
-
-    // Projection
 
     /// A fresh projection's positions after one rebuild.
     fn rebuild_projection(
@@ -1155,7 +1139,6 @@ mod tests {
         let store = gio::ListStore::new::<glib::Object>();
         let map = rebuild_projection(&list_model, &store, true);
 
-        // header, a, b, header, c, d
         assert_eq!(store.n_items(), 6);
         assert_eq!(map, vec![None, Some(0), Some(1), None, Some(2), Some(3)]);
         assert!(matches!(entry_at(&store, 1), ListEntry::Track { .. }));
@@ -1187,15 +1170,12 @@ mod tests {
 
         let store = gio::ListStore::new::<glib::Object>();
         let map1 = rebuild_projection(&list_model, &store, true);
-        // header, a, header, b
         assert_eq!(map1, vec![None, Some(0), None, Some(1)]);
 
         list_model
             .append(vec![make_disc_track("c", Some(2))])
             .commit();
         let map2 = rebuild_projection(&list_model, &store, true);
-        // header, a, header, b, c - the appended track shares disc 2 with
-        // "b", so no new header for it.
         assert_eq!(map2, vec![None, Some(0), None, Some(1), Some(2)]);
         assert_eq!(store.n_items(), 5);
     }
@@ -1254,7 +1234,6 @@ mod tests {
         let store = gio::ListStore::new::<glib::Object>();
         rebuild_projection(&list_model, &store, true);
 
-        // header, a (start), b (end), header, c (start and end)
         assert_eq!(
             disc_edges(&store),
             vec![
@@ -1269,9 +1248,6 @@ mod tests {
 
     #[test]
     fn test_projection_new_last_track_updates_old_last_track() {
-        // Loading a page after the list's last track: it's no longer the
-        // end of its disc, so it must get a new item (and be rebound), while
-        // unaffected rows keep theirs.
         let mut list_model = SongListModel::new(50);
         list_model
             .append(vec![
@@ -1310,16 +1286,14 @@ mod tests {
 
     #[test]
     fn test_projection_placeholders_while_loading() {
-        let list_model = SongListModel::new(50); // empty, not complete
+        let list_model = SongListModel::new(50);
         let store = gio::ListStore::new::<glib::Object>();
         let mut projection = skeleton_projection();
         projection.rebuild(&list_model, &store);
 
         assert_eq!(store.n_items() as usize, SKELETON_ROW_COUNT);
         assert!((0..store.n_items()).all(|i| is_placeholder(&store, i)));
-        // Not tracks: activating one does nothing.
         assert!(projection.positions.iter().all(Option::is_none));
-        // One card: rounded at the first and last placeholder.
         let edges = disc_edges(&store);
         assert_eq!(edges[0], Some((true, false)));
         assert_eq!(edges[SKELETON_ROW_COUNT - 1], Some((false, true)));
@@ -1343,14 +1317,12 @@ mod tests {
 
     #[test]
     fn test_projection_no_placeholders_when_empty_and_complete_or_disabled() {
-        // Loaded, and empty (e.g. an empty playlist).
         let mut empty = SongListModel::new(50);
         empty.append(vec![]).commit();
         let store = gio::ListStore::new::<glib::Object>();
         skeleton_projection().rebuild(&empty, &store);
         assert_eq!(store.n_items(), 0);
 
-        // Still loading, but the page turned placeholders off.
         let loading = SongListModel::new(50);
         Projection::default().rebuild(&loading, &store);
         assert_eq!(store.n_items(), 0);
@@ -1375,9 +1347,6 @@ mod tests {
             .commit();
         projection.rebuild(&list_model, &store);
 
-        // The first row is unchanged, so it keeps its object (and the
-        // ListView keeps its widget). The second was the last track and no
-        // longer is, so it gets a new one.
         assert_eq!(store.n_items(), 3);
         assert_eq!(store.item(0).unwrap(), before[0]);
         assert_ne!(store.item(1).unwrap(), before[1]);
@@ -1425,19 +1394,13 @@ mod tests {
         assert!(model.deselected.borrow().is_empty());
     }
 
-    // row_at_viewport_center
-
     #[test]
     fn test_row_at_viewport_center_at_top() {
-        // List starts 300px down a 600px viewport: the center (300px) is
-        // the list's first row.
         assert_eq!(row_at_viewport_center(300.0, 600.0, 1000), Some(0));
     }
 
     #[test]
     fn test_row_at_viewport_center_scrolled() {
-        // List top scrolled 56 * 700 px above the viewport; the center is
-        // another 300px (5 rows) further.
         let top = -(ROW_HEIGHT_PX as f64 * 700.0);
         assert_eq!(row_at_viewport_center(top, 600.0, 1000), Some(705));
     }
@@ -1451,9 +1414,6 @@ mod tests {
     fn test_row_at_viewport_center_empty_list() {
         assert_eq!(row_at_viewport_center(0.0, 600.0, 0), None);
     }
-
-    // anchor_for_center: the window GTK builds for an anchor `a` of `n`
-    // rows starts at a - 200 * a / n and spans 200 rows.
 
     fn window_start(anchor: u32, n: u32) -> f64 {
         anchor as f64 - GTK_MAX_ROW_WIDGETS as f64 * anchor as f64 / n as f64
@@ -1474,7 +1434,6 @@ mod tests {
     fn test_anchor_for_center_clamps_at_end() {
         let anchor = anchor_for_center(999, 1000);
         assert_eq!(anchor, 999);
-        // The window still reaches ~100 rows above the last row.
         assert!(window_start(anchor, 1000) <= 899.0);
     }
 
@@ -1484,11 +1443,8 @@ mod tests {
         assert_eq!(anchor_for_center(500, 180), 179);
     }
 
-    // should_load_more
-
     #[test]
     fn test_should_load_more_empty_list_at_top() {
-        // Nothing loaded yet, viewport covers everything there is (0 height).
         assert!(should_load_more(0.0, 0.0, 50.0, 0, 100, false));
     }
 
@@ -1509,7 +1465,6 @@ mod tests {
 
     #[test]
     fn test_should_load_more_false_when_complete() {
-        // Even at the bottom, a complete list must not request more.
         assert!(!should_load_more(1000.0, 1000.0, 50.0, 100, 100, true));
     }
 
@@ -1520,11 +1475,8 @@ mod tests {
 
     #[test]
     fn test_should_load_more_guards_against_over_requesting() {
-        // Loaded already exceeds the (possibly stale) total - must not loop.
         assert!(!should_load_more(1000.0, 1000.0, 50.0, 1200, 1000, false));
     }
-
-    // disc_header_text
 
     #[test]
     fn test_disc_header_text_formats_number() {
@@ -1545,8 +1497,6 @@ mod tests {
         let store = gio::ListStore::new::<glib::Object>();
         let map = rebuild_projection(&list_model, &store, true);
 
-        // header, a, b, header, c - "b" starts a new (unknown) disc but has
-        // no number to show.
         assert_eq!(map, vec![None, Some(0), Some(1), None, Some(2)]);
     }
 

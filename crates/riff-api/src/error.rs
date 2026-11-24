@@ -1,5 +1,3 @@
-//! Provider-neutral error type for the data layer.
-
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -33,6 +31,9 @@ pub enum DomainError {
 
     #[error("Shed under load")]
     Shed,
+
+    #[error("Not supported by this provider: {0}")]
+    Unsupported(&'static str),
 }
 
 impl DomainError {

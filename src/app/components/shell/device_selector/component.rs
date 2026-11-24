@@ -1,13 +1,9 @@
-use std::ops::Deref;
 use std::rc::Rc;
 
 use gtk::prelude::Cast;
 
-use crate::app::components::{dispatch_api_read, Component, EventListener};
-// The data-layer device type, aliased to avoid clashing with the app-state
-// `Device` enum imported below.
-use crate::app::models::Device as ConnectDevice;
-use crate::app::state::{Device, LoginEvent, PlaybackAction, PlaybackEvent};
+use crate::app::components::{Component, EventListener};
+use crate::app::state::{DeviceList, PlaybackAction, PlaybackFields};
 use crate::app::{AppEvent, AppModel, Dispatcher};
 
 use super::widget::DeviceSelectorWidget;
@@ -25,32 +21,19 @@ impl DeviceSelectorModel {
         }
     }
 
-    pub fn refresh_available_devices(&self) {
-        let api = self.app_model.api();
-
-        dispatch_api_read(&self.dispatcher, move |tag| async move {
-            api.get_devices(tag)
-                .await
-                .map(|devices| PlaybackAction::SetAvailableDevices(devices).into())
-        });
+    pub fn device_list(&self) -> DeviceList {
+        self.app_model.get_state().playback.device_list()
     }
 
-    pub fn get_available_devices(&self) -> impl Deref<Target = Vec<ConnectDevice>> + '_ {
-        self.app_model.map_state(|s| s.playback.available_devices())
-    }
-
-    pub fn get_current_device(&self) -> impl Deref<Target = Device> + '_ {
-        self.app_model.map_state(|s| s.playback.current_device())
-    }
-
-    pub fn set_current_device(&self, id: Option<String>) {
-        let devices = self.get_available_devices();
-        let connect_device = id
-            .and_then(|id| devices.iter().find(|&d| d.id == id))
-            .cloned();
-        let device = connect_device.map(Device::Connect).unwrap_or(Device::Local);
+    /// Moves playback to a device; `None` is this one.
+    pub fn transfer_to(&self, id: Option<String>) {
         self.dispatcher
-            .dispatch(PlaybackAction::SwitchDevice(device).into());
+            .dispatch(PlaybackAction::TransferTo(id).into());
+    }
+
+    pub fn set_volume(&self, volume: f64) {
+        self.dispatcher
+            .dispatch(PlaybackAction::SetVolume(volume).into());
     }
 }
 
@@ -63,21 +46,23 @@ impl DeviceSelector {
     pub fn new(widget: DeviceSelectorWidget, model: DeviceSelectorModel) -> Self {
         let model = Rc::new(model);
 
-        widget.connect_refresh(clone!(
-            #[weak]
-            model,
-            move || {
-                model.refresh_available_devices();
-            }
-        ));
-
         widget.connect_switch_device(clone!(
             #[weak]
             model,
             move |id| {
-                model.set_current_device(id);
+                model.transfer_to(id);
             }
         ));
+
+        widget.connect_volume_changed(clone!(
+            #[weak]
+            model,
+            move |volume| {
+                model.set_volume(volume);
+            }
+        ));
+
+        widget.update(&model.device_list());
 
         Self { widget, model }
     }
@@ -91,19 +76,8 @@ impl Component for DeviceSelector {
 
 impl EventListener for DeviceSelector {
     fn on_event(&mut self, event: &AppEvent) {
-        match event {
-            AppEvent::LoginEvent(LoginEvent::LoginCompleted) => {
-                self.model.refresh_available_devices();
-            }
-            AppEvent::PlaybackEvent(PlaybackEvent::AvailableDevicesChanged) => {
-                self.widget
-                    .update_devices_list(&self.model.get_available_devices());
-            }
-            AppEvent::PlaybackEvent(PlaybackEvent::SwitchedDevice(_)) => {
-                self.widget
-                    .set_current_device(&self.model.get_current_device());
-            }
-            _ => (),
+        if event.devices().is_some() || event.playback_changed(PlaybackFields::VOLUME) {
+            self.widget.update(&self.model.device_list());
         }
     }
 }

@@ -2,32 +2,90 @@ use gettextrs::gettext;
 use gio::prelude::*;
 use gio::SimpleActionGroup;
 use libadwaita::prelude::*;
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::rc::Rc;
 
 use crate::app::components::{
-    build_song_menu, fetch_queue_page, labels, DetailsPageModel, GroupButton, QueueMenuEntry,
-    SongActions, TrackListModel,
+    build_song_menu, labels, DetailsPageModel, GroupButton, QueueMenuEntry, SongActions,
+    TrackListModel,
 };
 use crate::app::models::{QueueRole, SongListModel, SongModel, Track};
+use crate::app::state::Action;
 use crate::app::state::{
-    Device, EntryKey, PlaybackAction, PlaybackState, SelectionAction, SelectionContext,
-    SelectionState,
+    DeviceFields, EntryKey, PlaybackAction, PlaybackFields, PlaybackState, SelectionAction,
+    SelectionContext, SelectionState,
 };
-use crate::app::{AppAction, AppModel, Dispatcher};
+use crate::app::{AppAction, AppEvent, AppModel, Dispatcher};
+use riff_core::pagination::PAGE_SIZE;
+use riff_core::play_queue::QueueSection;
 
 pub struct QueueListModel {
     base: DetailsPageModel,
     show_now_playing: bool,
+    view: SongListModel,
+    models: RefCell<HashMap<EntryKey, SongModel>>,
+    dragged: RefCell<Option<String>>,
+}
+
+fn section_label(section: &QueueSection) -> Option<String> {
+    match section {
+        QueueSection::NowPlaying => Some(labels::QUEUE_NOW_PLAYING.clone()),
+        QueueSection::Queued => Some(labels::QUEUE_NEXT_IN_QUEUE.clone()),
+        QueueSection::Context(Some(name)) => Some(labels::queue_context_label(name)),
+        QueueSection::Context(None) => Some(labels::QUEUE_NEXT_UP.clone()),
+    }
 }
 
 impl QueueListModel {
     pub fn new(app_model: Rc<AppModel>, dispatcher: Dispatcher, show_now_playing: bool) -> Self {
-        Self {
+        let model = Self {
             base: DetailsPageModel::new_without_id(app_model, dispatcher),
             show_now_playing,
-        }
+            view: SongListModel::new(PAGE_SIZE as u32),
+            models: RefCell::new(HashMap::new()),
+            dragged: RefCell::new(None),
+        };
+        model.sync_rows();
+        model
+    }
+
+    fn sync_rows(&self) {
+        let queue = self.queue();
+        let tracks: Vec<Track> = queue
+            .queue_rows()
+            .iter()
+            .map(|row| row.track.clone())
+            .collect();
+        self.base.liked.learn(&tracks);
+        let mut models = self.models.borrow_mut();
+        let songs: Vec<SongModel> = queue
+            .queue_rows()
+            .iter()
+            .map(|row| {
+                let model = match models.get(&row.key) {
+                    Some(model)
+                        if model.get_id() == row.track.rri.id
+                            && model.queue_role() == Some(row.role) =>
+                    {
+                        model.clone()
+                    }
+                    _ => {
+                        let model = SongModel::new_keyed(row.track.clone(), row.key.to_string());
+                        model.set_queue_role(Some(row.role));
+                        models.insert(row.key, model.clone());
+                        model
+                    }
+                };
+                model.set_group(section_label(&row.section));
+                model
+            })
+            .collect();
+        let listed: HashSet<EntryKey> = queue.queue_rows().iter().map(|row| row.key).collect();
+        models.retain(|key, _| listed.contains(key));
+        drop(queue);
+        self.view.clone().replace_models(songs).commit();
     }
 
     fn queue(&self) -> impl Deref<Target = PlaybackState> + '_ {
@@ -38,12 +96,8 @@ impl QueueListModel {
         !self.queue().queue_is_empty()
     }
 
-    /// A remote device's queue is read-only.
     pub fn selection_context(&self) -> SelectionContext {
-        match self.queue().current_device() {
-            Device::Local => SelectionContext::Queue,
-            Device::Connect(_) => SelectionContext::ReadOnlyQueue,
-        }
+        SelectionContext::Queue
     }
 
     fn listed_keys(&self) -> Vec<EntryKey> {
@@ -93,7 +147,9 @@ impl QueueListModel {
     }
 
     pub fn cancel_selection(&self) {
-        self.base.dispatcher.dispatch(AppAction::CancelSelection);
+        self.base
+            .dispatcher
+            .dispatch(AppAction::Core(Action::CancelSelection));
     }
 
     pub fn select_all(&self) {
@@ -136,8 +192,25 @@ fn queue_entry(row: &SongModel) -> Option<(EntryKey, QueueRole)> {
 }
 
 impl TrackListModel for QueueListModel {
+    fn apply_event(&self, event: &AppEvent) {
+        let moved = event.queue_changed()
+            || event.playback_changed(PlaybackFields::TRACK | PlaybackFields::CONTEXT)
+            || event
+                .devices()
+                .is_some_and(|d| d.changed.contains(DeviceFields::CURRENT));
+        if moved {
+            self.sync_rows();
+        }
+    }
+
+    fn update_liked(&self, event: &AppEvent) {
+        if let Some(event) = event.core() {
+            self.base.liked.apply(event);
+        }
+    }
+
     fn song_list_model(&self) -> SongListModel {
-        self.queue().queue_view().clone()
+        self.view.clone()
     }
 
     fn is_paused(&self) -> bool {
@@ -178,12 +251,7 @@ impl TrackListModel for QueueListModel {
         self.base.selection_in(true)
     }
 
-    fn load_more(&self) {
-        let query = self.queue().next_query(true);
-        if let Some((source, request)) = query {
-            fetch_queue_page(&self.base.app_model, &self.base.dispatcher, source, request);
-        }
-    }
+    fn load_more(&self) {}
 
     fn play_song_at(&self, pos: usize, _id: &str) {
         let key = self.queue().view_key(pos);
@@ -286,19 +354,28 @@ impl TrackListModel for QueueListModel {
     }
 
     fn can_drop_row(&self, key: &str, target: &str, after: bool) -> bool {
-        Self::drop_keys(key, target).is_some_and(|(key, target)| {
-            self.queue()
-                .can_move_entry(key, target, after, self.show_now_playing)
-        })
+        Self::drop_keys(key, target)
+            .is_some_and(|(key, target)| self.queue().can_move_entry(key, target, after))
+    }
+
+    fn drag_started(&self, key: &str) {
+        let track = key
+            .parse()
+            .ok()
+            .and_then(|key| self.queue().view_track(key));
+        self.dragged.replace(track.map(|track| track.rri.id));
     }
 
     fn drop_row(&self, key: &str, target: &str, after: bool) {
+        let Some(track_id) = self.dragged.take() else {
+            return;
+        };
         if let Some((key, target)) = Self::drop_keys(key, target) {
             let action = PlaybackAction::MoveEntry {
                 key,
+                track_id,
                 target,
                 after,
-                current_listed: self.show_now_playing,
             };
             self.base.dispatcher.dispatch(action.into());
         }
@@ -369,8 +446,11 @@ impl crate::app::ProvidesApi for QueueListModel {
 mod tests {
     use super::*;
     use crate::app::models::make_track;
-    use crate::app::state::AppState;
+    use crate::app::state::{AppState, SelectionFields};
+    use crate::app::AppEvent;
     use crate::app::SongsSource;
+    use riff_core::playback::test_playing_from;
+    use riff_core::remote::PlaybackView;
     use std::cell::Cell;
     use std::sync::Arc;
 
@@ -387,7 +467,7 @@ mod tests {
     fn make_model(show_now_playing: bool) -> (Rc<AppModel>, Rc<QueueListModel>) {
         let (sender, _receiver) = futures::channel::mpsc::unbounded();
         std::mem::forget(_receiver);
-        let app_model = Rc::new(AppModel::new(AppState::new(), test_api_service()));
+        let app_model = Rc::new(AppModel::new(AppState::default(), test_api_service()));
         let model = Rc::new(QueueListModel::new(
             app_model.clone(),
             Dispatcher::new(sender),
@@ -400,7 +480,7 @@ mod tests {
     fn test_binding_rows_during_state_updates_doesnt_read_state() {
         let (app_model, model) = make_model(true);
         let bound = Rc::new(Cell::new(0));
-        let view = app_model.get_state().playback.queue_view().clone();
+        let view = model.song_list_model();
         {
             let model = model.clone();
             let bound = bound.clone();
@@ -419,52 +499,45 @@ mod tests {
             });
         }
 
-        let tracks = ["1", "2", "3", "4"]
-            .iter()
-            .map(|id| make_track(id))
-            .collect();
-        let actions: Vec<AppAction> = vec![
-            PlaybackAction::LoadContextSongs(SongsSource::Album("a".into()), tracks).into(),
-            PlaybackAction::Load("1".to_string()).into(),
-            AppAction::QueueTracks {
-                tracks: vec![make_track("x"), make_track("x")],
-            },
-            AppAction::QueueTracks {
-                tracks: vec![make_track("y")],
-            },
-            PlaybackAction::Next.into(),
-            PlaybackAction::TrackEnded.into(),
-            PlaybackAction::ToggleShuffle.into(),
-            PlaybackAction::ToggleRepeat.into(),
-            PlaybackAction::Previous.into(),
-            PlaybackAction::Stop.into(),
-            PlaybackAction::Play.into(),
-        ];
-        for action in actions {
-            app_model.update_state(action);
-        }
-        app_model.update_state(AppAction::QueueTracks {
-            tracks: vec![make_track("z"), make_track("w")],
-        });
-        let keys = app_model.get_state().playback.view_keys().to_vec();
-        let actions: Vec<AppAction> = vec![
-            PlaybackAction::RemoveEntries(vec![keys[2]]).into(),
-            PlaybackAction::MoveEntry {
-                key: keys[3],
-                target: keys[1],
-                after: false,
-                current_listed: true,
+        let apply = |action: AppAction| {
+            for event in app_model.update_state(action) {
+                model.apply_event(&event);
             }
-            .into(),
-            PlaybackAction::PlayEntry(keys[3]).into(),
-            PlaybackAction::ClearQueued.into(),
-            PlaybackAction::ReplaceQueue.into(),
+        };
+        let album = || Some(SongsSource::Album("a".into()));
+        let reports = [
+            playing(album(), "1", &["x", "x", "y"], &["2", "3", "4"]),
+            playing(album(), "2", &[], &["3", "4"]),
+            playing(album(), "3", &["z"], &["4"]),
+            PlaybackView::default(),
         ];
-        for action in actions {
-            app_model.update_state(action);
+        for report in reports {
+            apply(PlaybackAction::Show(Box::new(report)).into());
         }
 
         assert!(bound.get() > 0);
+    }
+
+    fn tracks(ids: &[&str]) -> Vec<Track> {
+        ids.iter().map(|id| make_track(id)).collect()
+    }
+
+    fn playing(
+        source: Option<SongsSource>,
+        current: &str,
+        queued: &[&str],
+        next: &[&str],
+    ) -> PlaybackView {
+        let report = test_playing_from(source, make_track(current), &tracks(queued), &tracks(next));
+        match report {
+            PlaybackAction::Show(view) => *view,
+            _ => unreachable!(),
+        }
+    }
+
+    fn play(app_model: &AppModel, current: &str, queued: &[&str], next: &[&str]) {
+        let view = playing(Some(SongsSource::Album("a".into())), current, queued, next);
+        app_model.update_state(PlaybackAction::Show(Box::new(view)).into());
     }
 
     fn row_keys(app_model: &AppModel) -> Vec<String> {
@@ -481,19 +554,11 @@ mod tests {
     fn test_rows_menus_and_drops() {
         let (app_model, model) = make_model(true);
         let album = SongsSource::Album("a".into());
-        let tracks = ["1", "2"].iter().map(|id| make_track(id)).collect();
-        app_model
-            .update_state(PlaybackAction::SetContextName(album.clone(), "An Album".into()).into());
-        app_model.update_state(PlaybackAction::LoadContextSongs(album, tracks).into());
-        app_model.update_state(PlaybackAction::Load("1".to_string()).into());
-        app_model.update_state(AppAction::QueueTracks {
-            tracks: ["p", "a", "b", "c"]
-                .iter()
-                .map(|id| make_track(id))
-                .collect(),
-        });
+        app_model.update_state(PlaybackAction::SetContextName(album, "An Album".into()).into());
+        play(&app_model, "1", &["p", "a", "b", "c"], &["2"]);
 
-        let view = app_model.get_state().playback.queue_view().clone();
+        model.sync_rows();
+        let view = model.song_list_model();
         let row = |i| view.index_continuous(i).unwrap();
         let (current, queued, context) = (row(0), row(1), row(5));
         assert!(model.is_row_playing(&current.row_key()));
@@ -529,12 +594,8 @@ mod tests {
     #[test]
     fn test_drops_tell_if_the_current_track_is_listed() {
         let (sender, mut receiver) = futures::channel::mpsc::unbounded();
-        let app_model = Rc::new(AppModel::new(AppState::new(), test_api_service()));
-        let tracks = ["1", "2", "3"].iter().map(|id| make_track(id)).collect();
-        app_model.update_state(
-            PlaybackAction::LoadContextSongs(SongsSource::Album("a".into()), tracks).into(),
-        );
-        app_model.update_state(PlaybackAction::Load("1".to_string()).into());
+        let app_model = Rc::new(AppModel::new(AppState::default(), test_api_service()));
+        play(&app_model, "1", &[], &["2", "3"]);
         let rows = row_keys(&app_model);
 
         for show_now_playing in [true, false] {
@@ -544,14 +605,15 @@ mod tests {
                 show_now_playing,
             );
             assert!(model.can_drop_row(&rows[2], &rows[1], false));
+            model.drag_started(&rows[2]);
             model.drop_row(&rows[2], &rows[1], false);
             let action = receiver.try_next().ok().flatten().expect("an action");
-            let AppAction::PlaybackAction(PlaybackAction::MoveEntry {
+            let AppAction::Core(Action::Playback(PlaybackAction::MoveEntry {
                 key,
                 target,
                 after: false,
-                current_listed,
-            }) = action
+                ..
+            })) = action
             else {
                 panic!("not MoveEntry: {:?}", action);
             };
@@ -559,7 +621,6 @@ mod tests {
                 (key.to_string(), target.to_string()),
                 (rows[2].clone(), rows[1].clone())
             );
-            assert_eq!(current_listed, show_now_playing);
         }
     }
 
@@ -568,11 +629,7 @@ mod tests {
         let (app_model, model) = make_model(true);
         let page =
             DetailsPageModel::new_without_id(app_model.clone(), model.base.dispatcher.clone());
-        let tracks = ["1", "2"].iter().map(|id| make_track(id)).collect();
-        app_model.update_state(
-            PlaybackAction::LoadContextSongs(SongsSource::Album("a".into()), tracks).into(),
-        );
-        app_model.update_state(PlaybackAction::Load("1".to_string()).into());
+        play(&app_model, "1", &[], &["2"]);
         let enabled = |selecting: bool| {
             (
                 selecting,
@@ -582,7 +639,9 @@ mod tests {
         };
         assert_eq!(enabled(model.is_selecting()), (false, false, false));
 
-        app_model.update_state(AppAction::EnableSelection(model.selection_context()));
+        app_model.update_state(AppAction::Core(Action::EnableSelection(
+            model.selection_context(),
+        )));
         assert_eq!(enabled(model.is_selecting()), (true, true, false));
         assert!(!model.all_selected());
         let rows = row_keys(&app_model)
@@ -593,8 +652,13 @@ mod tests {
         assert!(model.all_selected());
         assert_eq!(model.selected_count(), 2);
 
-        let events = app_model.update_state(AppAction::EnableSelection(SelectionContext::Default));
-        assert_eq!(events.len(), 2);
+        let events = app_model.update_state(AppAction::Core(Action::EnableSelection(
+            SelectionContext::Default,
+        )));
+        assert!(
+            matches!(&events[..], [AppEvent::Core(crate::app::state::Event::Selection(selection))]
+            if selection.changed == SelectionFields::MODE | SelectionFields::ITEMS)
+        );
         assert_eq!(enabled(model.is_selecting()), (false, false, true));
         assert_eq!(model.selected_count(), 0);
         assert!(!model.all_selected());
@@ -603,13 +667,10 @@ mod tests {
     #[test]
     fn test_lists_the_current_track_only_with_now_playing() {
         let (sender, mut receiver) = futures::channel::mpsc::unbounded();
-        let app_model = Rc::new(AppModel::new(AppState::new(), test_api_service()));
-        let tracks = ["1", "2", "3"].iter().map(|id| make_track(id)).collect();
-        app_model.update_state(
-            PlaybackAction::LoadContextSongs(SongsSource::Album("a".into()), tracks).into(),
-        );
-        app_model.update_state(PlaybackAction::Load("1".to_string()).into());
-        let view = app_model.get_state().playback.queue_view().clone();
+        let app_model = Rc::new(AppModel::new(AppState::default(), test_api_service()));
+        play(&app_model, "1", &[], &["2", "3"]);
+        let probe = QueueListModel::new(app_model.clone(), Dispatcher::new(sender.clone()), true);
+        let view = probe.song_list_model();
         let current = view.index_continuous(0).unwrap();
 
         for show_now_playing in [true, false] {
@@ -622,7 +683,7 @@ mod tests {
             assert!(!model.hides_row(&view.index_continuous(1).unwrap()));
             model.play_id("2");
             let action = receiver.try_next().ok().flatten().expect("an action");
-            let AppAction::PlaybackAction(PlaybackAction::PlayEntry(key)) = action else {
+            let AppAction::Core(Action::Playback(PlaybackAction::PlayEntry(key))) = action else {
                 panic!("not PlayEntry: {:?}", action);
             };
             assert_eq!(

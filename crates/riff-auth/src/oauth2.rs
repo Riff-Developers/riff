@@ -265,6 +265,12 @@ impl RiffOauthClient {
         }
     }
 
+    /// Renews the saved token now, as one was refused before it expired.
+    pub async fn refresh_now(&self) -> Result<Credentials, OAuthError> {
+        let token = self.token_store.get().await.ok_or(OAuthError::LoggedOut)?;
+        Self::refresh(&self.client, &self.token_store, token).await
+    }
+
     /// Dev tools only: backdate the cached token so it looks expired, then run
     /// the normal valid-token path, which will refresh it against Spotify.
     /// Exercises the full token-refresh flow on demand.

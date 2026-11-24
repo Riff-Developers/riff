@@ -1,16 +1,12 @@
-//! Holds a GtkApplication suspend inhibitor while audio is playing, so the
-//! system does not automatically suspend during unattended playback.
-
 use gettextrs::gettext;
-use gio::prelude::SettingsExt;
 use gtk::prelude::*;
+use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::app::components::EventListener;
 use crate::app::{AppEvent, AppModel};
 
-use riff_config::settings::SETTINGS;
-const INHIBIT_SUSPEND_KEY: &str = "inhibit-suspend";
+use riff_config::{Setting, SettingsStore};
 
 /// Pure decision helper: whether a suspend inhibitor should be held.
 ///
@@ -20,78 +16,39 @@ fn should_inhibit(enabled: bool, playing: bool) -> bool {
     enabled && playing
 }
 
-/// Holds a GtkApplication suspend inhibitor while audio is playing.
-///
-/// The inhibitor is acquired when playback is active (and the preference is
-/// enabled) and released when playback is paused or stopped, or when the
-/// preference is turned off. Inside a Flatpak sandbox, GTK routes this through
-/// the org.freedesktop.portal.Inhibit portal transparently.
 pub struct SuspendInhibitor {
     window: libadwaita::ApplicationWindow,
     app_model: Rc<AppModel>,
-    settings: gio::Settings,
-    cookie: Rc<std::cell::Cell<Option<u32>>>,
+    settings: SettingsStore,
+    cookie: Cell<Option<u32>>,
 }
 
 impl SuspendInhibitor {
     pub fn new(window: libadwaita::ApplicationWindow, app_model: Rc<AppModel>) -> Self {
-        let settings = gio::Settings::new(SETTINGS);
-        let cookie = Rc::new(std::cell::Cell::new(None));
+        let settings = SettingsStore::new();
 
         let inhibitor = Self {
             window,
             app_model,
             settings,
-            cookie,
+            cookie: Cell::new(None),
         };
 
-        inhibitor.connect_settings_changed();
-        // Establish the correct state up front in case playback is already
-        // active when the inhibitor is created.
         inhibitor.refresh();
         inhibitor
     }
 
-    /// React immediately when the preference is toggled, so enabling or
-    /// disabling it during playback takes effect without waiting for the next
-    /// playback event.
-    fn connect_settings_changed(&self) {
-        let window = self.window.clone();
-        let app_model = Rc::clone(&self.app_model);
-        let settings = self.settings.clone();
-        let cookie = Rc::clone(&self.cookie);
-        self.settings
-            .connect_changed(Some(INHIBIT_SUSPEND_KEY), move |_, _| {
-                Self::recompute(&window, &settings, &app_model, &cookie);
-            });
-    }
-
-    /// Recompute the desired inhibit state from the current settings and
-    /// playback state, then apply it.
+    /// Applies the inhibit decision for the current preference and playback.
     fn refresh(&self) {
-        Self::recompute(&self.window, &self.settings, &self.app_model, &self.cookie);
-    }
-
-    /// Read the current preference and playback state and apply the resulting
-    /// inhibit decision. Shared by `refresh` and the settings-changed handler.
-    fn recompute(
-        window: &libadwaita::ApplicationWindow,
-        settings: &gio::Settings,
-        app_model: &AppModel,
-        cookie: &std::cell::Cell<Option<u32>>,
-    ) {
-        let enabled = settings.boolean(INHIBIT_SUSPEND_KEY);
-        let playing = app_model.get_state().playback.is_playing();
-        Self::apply(window, cookie, should_inhibit(enabled, playing));
+        let enabled = self.settings.bool(Setting::InhibitSuspend);
+        let playing = self.app_model.get_state().playback.is_playing();
+        self.apply(should_inhibit(enabled, playing));
     }
 
     /// Acquire or release the inhibitor to match `desired`, guarding against
     /// double-acquire and double-release.
-    fn apply(
-        window: &libadwaita::ApplicationWindow,
-        cookie: &std::cell::Cell<Option<u32>>,
-        desired: bool,
-    ) {
+    fn apply(&self, desired: bool) {
+        let (window, cookie) = (&self.window, &self.cookie);
         let held = cookie.get().is_some();
         if desired == held {
             return;
@@ -122,7 +79,10 @@ impl SuspendInhibitor {
 
 impl EventListener for SuspendInhibitor {
     fn on_event(&mut self, event: &AppEvent) {
-        if let AppEvent::PlaybackEvent(_) = event {
+        let suspend_changed = event
+            .settings()
+            .is_some_and(|changed| changed.contains(Setting::InhibitSuspend));
+        if event.playback().is_some() || suspend_changed {
             self.refresh();
         }
     }

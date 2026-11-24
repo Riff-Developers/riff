@@ -25,6 +25,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Move the Flatpak installation onto the container's writable layer
+        run: |
+          cp -a /var/lib/flatpak /var/lib/flatpak.copy
+          rm -rf /var/lib/flatpak
+          mv /var/lib/flatpak.copy /var/lib/flatpak
+
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: riff-${{ matrix.variant.arch }}.flatpak

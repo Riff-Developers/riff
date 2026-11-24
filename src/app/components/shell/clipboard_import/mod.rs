@@ -6,14 +6,10 @@ use gtk::prelude::*;
 use libadwaita::prelude::*;
 
 use crate::app::components::{dispatch_api_read, is_app_copied_link, EventListener};
-use crate::app::state::SpotifyLink;
 use crate::app::{AppAction, AppModel, Dispatcher};
+use riff_api::models::Link;
 
-/// Watches the system clipboard and, when the Riff window is focused, offers to
-/// open a Spotify link the user copied from somewhere other than Riff.
 pub struct ClipboardImport {
-    // Kept alive for the lifetime of the component; the window signal holds a
-    // weak reference to it.
     _watcher: Rc<ClipboardWatcher>,
 }
 
@@ -31,8 +27,6 @@ impl ClipboardImport {
             dialog_open: Cell::new(false),
         });
 
-        // Check the clipboard whenever the window gains focus. A weak reference
-        // avoids a reference cycle between the window and the watcher.
         let watcher_weak = Rc::downgrade(&watcher);
         window.connect_is_active_notify(move |window| {
             if !window.is_active() {
@@ -53,8 +47,6 @@ struct ClipboardWatcher {
     window: libadwaita::ApplicationWindow,
     dispatcher: Dispatcher,
     app_model: Rc<AppModel>,
-    // The last link the user chose not to open (or already acted on). Prevents
-    // re-prompting for the same link every time the window regains focus.
     dismissed: RefCell<Option<String>>,
     dialog_open: Cell<bool>,
 }
@@ -78,12 +70,12 @@ impl ClipboardWatcher {
         let dismissed = self.dismissed.borrow().clone();
         let decision = decide(&text, is_app_copied_link(&text), dismissed.as_deref());
         if let Some(link) = decision {
-            debug!("clipboard contains a Spotify {} link", link.kind_label());
+            debug!("clipboard contains a link: {link:?}");
             self.show_dialog(text, link);
         }
     }
 
-    fn show_dialog(self: &Rc<Self>, text: String, link: SpotifyLink) {
+    fn show_dialog(self: &Rc<Self>, text: String, link: Link) {
         if self.dialog_open.replace(true) {
             return;
         }
@@ -91,23 +83,23 @@ impl ClipboardWatcher {
         let heading = gettext("Open Spotify link?");
         let body = match &link {
             // translators: shown when an album link is found in the clipboard.
-            SpotifyLink::Album(_) => {
+            Link::Album(_) => {
                 gettext("There’s a Spotify album link in your clipboard. Open it in Riff?")
             }
             // translators: shown when an artist link is found in the clipboard.
-            SpotifyLink::Artist(_) => {
+            Link::Artist(_) => {
                 gettext("There’s a Spotify artist link in your clipboard. Open it in Riff?")
             }
             // translators: shown when a playlist link is found in the clipboard.
-            SpotifyLink::Playlist(_) => {
+            Link::Playlist(_) => {
                 gettext("There’s a Spotify playlist link in your clipboard. Open it in Riff?")
             }
             // translators: shown when a user profile link is found in the clipboard.
-            SpotifyLink::User(_) => {
+            Link::User(_) => {
                 gettext("There’s a Spotify profile link in your clipboard. Open it in Riff?")
             }
             // translators: shown when a track link is found in the clipboard.
-            SpotifyLink::Track(_) => {
+            Link::Track(_) => {
                 gettext("There’s a Spotify track link in your clipboard. Open it in Riff?")
             }
         };
@@ -125,8 +117,6 @@ impl ClipboardWatcher {
             gio::Cancellable::NONE,
             move |response| {
                 this.dialog_open.set(false);
-                // Remember this link either way, so it isn't prompted again
-                // until the clipboard changes.
                 this.dismissed.replace(Some(text.trim().to_string()));
                 if response.as_str() == "open" {
                     this.open_link(link);
@@ -135,15 +125,13 @@ impl ClipboardWatcher {
         );
     }
 
-    fn open_link(&self, link: SpotifyLink) {
+    fn open_link(&self, link: Link) {
         match link {
-            SpotifyLink::Album(id) => self.dispatcher.dispatch(AppAction::ViewAlbum(id)),
-            SpotifyLink::Artist(id) => self.dispatcher.dispatch(AppAction::ViewArtist(id)),
-            SpotifyLink::Playlist(id) => self.dispatcher.dispatch(AppAction::ViewPlaylist(id)),
-            SpotifyLink::User(id) => self.dispatcher.dispatch(AppAction::ViewUser(id)),
-            SpotifyLink::Track(id) => {
-                // No track detail screen exists: resolve the track's album and
-                // open that instead.
+            Link::Album(id) => self.dispatcher.dispatch(AppAction::ViewAlbum(id)),
+            Link::Artist(id) => self.dispatcher.dispatch(AppAction::ViewArtist(id)),
+            Link::Playlist(id) => self.dispatcher.dispatch(AppAction::ViewPlaylist(id)),
+            Link::User(id) => self.dispatcher.dispatch(AppAction::ViewUser(id)),
+            Link::Track(id) => {
                 let api = self.app_model.api();
                 dispatch_api_read(&self.dispatcher, move |tag| async move {
                     api.get_track(&id, tag).await.map(|song| {
@@ -158,8 +146,8 @@ impl ClipboardWatcher {
 /// Pure decision logic: given the clipboard text, whether it matches a link
 /// Riff itself copied, and the last dismissed link, return the link to prompt
 /// for (if any).
-fn decide(text: &str, is_app_copied: bool, dismissed: Option<&str>) -> Option<SpotifyLink> {
-    let link = SpotifyLink::parse(text)?;
+fn decide(text: &str, is_app_copied: bool, dismissed: Option<&str>) -> Option<Link> {
+    let link = riff_api::parse_link(text)?;
     if is_app_copied {
         return None;
     }
@@ -178,7 +166,7 @@ mod tests {
         let text = "https://open.spotify.com/album/abc";
         assert_eq!(
             decide(text, false, None),
-            Some(SpotifyLink::Album("abc".to_string()))
+            Some(Link::Album("abc".to_string()))
         );
     }
 
@@ -205,7 +193,7 @@ mod tests {
         let text = "https://open.spotify.com/playlist/new";
         assert_eq!(
             decide(text, false, Some("https://open.spotify.com/playlist/old")),
-            Some(SpotifyLink::Playlist("new".to_string()))
+            Some(Link::Playlist("new".to_string()))
         );
     }
 }

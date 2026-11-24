@@ -5,7 +5,7 @@ use gtk::CompositeTemplate;
 
 use super::lock_button;
 
-use riff_config::settings::SETTINGS;
+use riff_config::{Setting, SettingsStore};
 
 mod imp {
     use super::*;
@@ -66,17 +66,15 @@ impl PanWidget {
     }
 
     fn bind_settings(&self) {
-        let settings = gio::Settings::new(SETTINGS);
+        let settings = SettingsStore::new();
         let imp = self.imp();
 
-        // Bind the balance one-way to avoid the bidirectional feedback loop that
-        // reverts single scale steps (same approach as the equalizer bands).
         let scale = imp.pan_balance.get();
         let adjustment = scale.adjustment();
-        adjustment.set_value(settings.double("pan"));
+        adjustment.set_value(settings.double(Setting::Pan));
         let settings_clone = settings.clone();
         adjustment.connect_value_changed(move |adj| {
-            let _ = settings_clone.set_double("pan", adj.value());
+            let _ = settings_clone.set_double(Setting::Pan, adj.value());
         });
     }
 

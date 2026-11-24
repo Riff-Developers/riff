@@ -19,7 +19,7 @@ MenuButton dev_menu {
       margin-end: 8;
 
       Label {
-        label: "Dev Toggles";
+        label: "Interface";
         styles ["heading"]
         halign: start;
       }
@@ -63,10 +63,22 @@ MenuButton dev_menu {
         Switch dev_panel_sizes_switch {}
       }
 
+      Button dev_test_toast {
+        label: "Test Toast";
+      }
+
+      Button dev_reload_css {
+        label: "Reload CSS";
+      }
+
+      Button dev_dump_state {
+        label: "Dump State to Log";
+      }
+
       Separator {}
 
       Label {
-        label: "Simulated Failures";
+        label: "riff-api";
         styles ["heading"]
         halign: start;
       }
@@ -123,6 +135,14 @@ MenuButton dev_menu {
         label: "Expire OAuth Token";
       }
 
+      Separator {}
+
+      Label {
+        label: "Librespot";
+        styles ["heading"]
+        halign: start;
+      }
+
       Button dev_kill_player {
         label: "Kill Player";
 
@@ -130,44 +150,78 @@ MenuButton dev_menu {
       }
 
       Button dev_kill_session {
-        label: "Kill Librespot Session";
+        label: "Kill Session";
 
         styles ["destructive-action"]
       }
 
       Button dev_simulate_unavailable {
         label: "Simulate Unavailable Track";
-        tooltip-text: "Inject one 'track failed to load' event; click repeatedly to trip the stop threshold";
+      }
+
+      Button dev_reset_drm {
+        label: "Reset DRM Verification";
+      }
+
+      Button dev_show_drm_dialog {
+        label: "Show DRM Warning";
       }
 
       Separator {}
 
       Label {
-        label: "Utilities";
+        label: "Soloist";
         styles ["heading"]
         halign: start;
       }
 
-      Button dev_test_toast {
-        label: "Test Toast";
+      Button dev_soloist_check_update {
+        label: "Check for Update Now";
       }
 
-      Button dev_reload_css {
-        label: "Reload CSS";
+      Button dev_soloist_out_of_date {
+        label: "Make Build Out of Date";
       }
 
-      Button dev_dump_state {
-        label: "Dump State to Log";
+      Button dev_soloist_kill {
+        label: "Kill Soloist";
+
+        styles ["destructive-action"]
       }
 
-      Button dev_reset_drm {
-        label: "Reset DRM Verification";
-        tooltip-text: "Forget that this account has played a track and re-arm PlayPlay DRM detection";
+      Box {
+        orientation: horizontal;
+        spacing: 8;
+
+        Label {
+          label: "Block Downloads";
+          hexpand: true;
+          halign: start;
+        }
+
+        Switch dev_soloist_block_switch {}
       }
 
-      Button dev_show_drm_dialog {
-        label: "Show DRM Warning";
-        tooltip-text: "Pop up the PlayPlay DRM \"Playback Not Available\" dialog";
+      Label {
+        label: "Show Toast";
+        halign: start;
+      }
+
+      Box {
+        orientation: horizontal;
+        styles ["linked"]
+
+        Button dev_soloist_toast_updating {
+          label: "Updating";
+        }
+
+        Button dev_soloist_toast_failed {
+          label: "Not Available";
+        }
+
+        Button dev_soloist_toast_expires {
+          label: "Expires Soon";
+        }
       }
     };
   };

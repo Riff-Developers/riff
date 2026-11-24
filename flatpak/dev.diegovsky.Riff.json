@@ -5,7 +5,8 @@
   "sdk": "org.gnome.Sdk",
   "sdk-extensions": [
     "org.freedesktop.Sdk.Extension.rust-stable",
-    "org.freedesktop.Sdk.Extension.openjdk25"
+    "org.freedesktop.Sdk.Extension.openjdk25",
+    "org.freedesktop.Sdk.Extension.llvm21"
   ],
   "command": "riff",
   "finish-args": [
@@ -14,13 +15,15 @@
     "--socket=fallback-x11",
     "--socket=wayland",
     "--socket=pulseaudio",
+    "--filesystem=xdg-run/pipewire-0",
     "--device=dri"
   ],
   "separate-locales": false,
   "build-options": {
-    "append-path": "/usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/openjdk25/bin",
+    "append-path": "/usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/openjdk25/bin:/usr/lib/sdk/llvm21/bin",
     "env": {
       "CARGO_HOME": "/run/build/riff/cargo",
+      "LIBCLANG_PATH": "/usr/lib/sdk/llvm21/lib",
       "OPENAPI_GENERATOR_JAR": "/run/build/riff/openapi-generator-cli-7.12.0.jar",
       "RUST_BACKTRACE": "full",
       "RUST_LOG": "riff=debug"

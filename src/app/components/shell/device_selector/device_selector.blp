@@ -1,44 +1,147 @@
 using Gtk 4.0;
-using Adw 1;
 
 template $DeviceSelectorWidget : Button {
-  Adw.ButtonContent button_content {
-    halign: center;
-    hexpand: false;
-    icon-name: "audio-x-generic-symbolic";
-    label: _("This Device");
-  }
+  /* Translators: Tooltip of the button that picks the device music plays on. */
+  tooltip-text: _("Connect to a Device");
+
+  icon-name: "computer-symbolic";
 }
 
-menu menu {
-  section {
-    label: _("Playing On");
+Popover popover {
+  position: top;
 
-    item {
-      custom: "custom_content";
-    }
-  }
+  styles [
+    "device-selector",
+  ]
 
-  section {
-    item {
-      label: _("Refresh Devices");
-      action: "devices.refresh";
-    }
-  }
-}
-
-PopoverMenu popover {
-}
-
-Box custom_content {
-  orientation: vertical;
-
-  CheckButton this_device_button {
-    label: _("This Device");
-    sensitive: false;
-  }
-
-  Box devices {
+  child: Box {
     orientation: vertical;
-  }
+    spacing: 12;
+    width-request: 300;
+    margin-top: 6;
+    margin-bottom: 6;
+    margin-start: 6;
+    margin-end: 6;
+
+    Box {
+      orientation: vertical;
+      spacing: 6;
+
+      Label {
+        /* Translators: Heading above the device music is playing on. */
+        label: _("Listening On");
+        xalign: 0;
+
+        styles [
+          "caption-heading",
+          "dim-label",
+        ]
+      }
+
+      Box {
+        spacing: 12;
+
+        Image current_icon {
+          icon-name: "computer-symbolic";
+          icon-size: large;
+
+          styles [
+            "accent",
+          ]
+        }
+
+        Box {
+          orientation: vertical;
+          valign: center;
+
+          Label current_name {
+            label: _("This Device");
+            xalign: 0;
+            ellipsize: end;
+
+            styles [
+              "heading",
+              "accent",
+            ]
+          }
+
+          Label current_subtitle {
+            visible: false;
+            xalign: 0;
+            ellipsize: end;
+
+            styles [
+              "caption",
+              "dim-label",
+            ]
+          }
+        }
+      }
+
+      Box volume_box {
+        visible: false;
+        spacing: 6;
+
+        Image {
+          icon-name: "multimedia-volume-control-symbolic";
+        }
+
+        Scale volume_scale {
+          hexpand: true;
+          /* Translators: Accessible name of the volume slider of the device music plays on. */
+          tooltip-text: _("Device Volume");
+
+          adjustment: Adjustment {
+            lower: 0;
+            upper: 100;
+            step-increment: 1;
+            page-increment: 10;
+          };
+        }
+      }
+    }
+
+    Separator {}
+
+    Box {
+      orientation: vertical;
+      spacing: 6;
+
+      Box {
+        spacing: 6;
+
+        Label {
+          /* Translators: Heading above the devices music can be moved to. */
+          label: _("Select Another Device");
+          xalign: 0;
+          hexpand: true;
+
+          styles [
+            "caption-heading",
+            "dim-label",
+          ]
+        }
+
+        Spinner spinner {}
+      }
+
+      ListBox devices_list {
+        selection-mode: none;
+
+        styles [
+          "boxed-list",
+        ]
+      }
+
+      Label empty_label {
+        label: _("No other devices found. Open the app on another device to see it here.");
+        wrap: true;
+        xalign: 0;
+
+        styles [
+          "dim-label",
+        ]
+      }
+    }
+  };
 }

@@ -3,8 +3,9 @@ use std::rc::Rc;
 
 use crate::app::components::EventListener;
 use crate::app::models::*;
-use crate::app::state::{HomePage, PlaybackAction, PlaybackEvent, Route, SelectionEvent};
-use crate::app::{AppEvent, AppModel, AppState, BrowserAction, Dispatcher};
+use crate::app::state::NavigationAction;
+use crate::app::state::{Event, HomePage, PlaybackAction, PlaybackFields, Route, SessionFields};
+use crate::app::{AppEvent, AppModel, AppState, Dispatcher};
 
 use super::playback_widget::PlaybackWidget;
 use super::{BarTrack, QueueBarWidget};
@@ -32,7 +33,7 @@ impl PlaybackModel {
 
     fn go_home(&self) {
         self.dispatcher
-            .dispatch(BrowserAction::Navigate(Route::Home(HomePage::NowPlaying)).into());
+            .dispatch(NavigationAction::Go(Route::Home(HomePage::NowPlaying)).into());
     }
 
     fn is_playing(&self) -> bool {
@@ -185,16 +186,6 @@ impl PlaybackControl {
     }
 
     fn set_connection_lost(&self, lost: bool) {
-        // Do NOT freeze the seekbar during an outage. A dead session does not
-        // stop playback: buffered audio keeps streaming from the CDN, so the
-        // local clock stays in sync with what the user actually hears. Freezing
-        // it here left the seekbar behind, and since no Playing event fires when
-        // playback was never interrupted, it never resynced once the session
-        // came back. If playback really was interrupted, the reload after
-        // reconnect emits a SyncSeek that corrects the position. We only make
-        // sure the clock is running again on restore, in case playback was
-        // paused and resumed during the outage. The "reconnecting" indicator
-        // itself is shown as a persistent toast by the Notification component.
         if !lost && self.model.is_playing() {
             self.widget.resume_seek_position();
         }
@@ -203,44 +194,41 @@ impl PlaybackControl {
 
 impl EventListener for PlaybackControl {
     fn on_event(&mut self, event: &AppEvent) {
-        match event {
-            AppEvent::PlaybackEvent(PlaybackEvent::PlaybackPaused)
-            | AppEvent::PlaybackEvent(PlaybackEvent::PlaybackResumed) => {
+        if let Some(playback) = event.playback() {
+            let changed = playback.changed;
+            if changed.intersects(PlaybackFields::STATUS | PlaybackFields::TRACK) {
                 self.update_playing();
             }
-            AppEvent::PlaybackEvent(PlaybackEvent::RepeatModeChanged(mode)) => {
-                self.update_repeat(mode);
-                self.update_queue_bar();
+            if changed.contains(PlaybackFields::TRACK) {
+                self.update_current_info();
             }
-            AppEvent::PlaybackEvent(PlaybackEvent::ShuffleChanged(_)) => {
+            if changed.contains(PlaybackFields::REPEAT) {
+                self.update_repeat(&playback.state.repeat);
+            }
+            if changed.contains(PlaybackFields::SHUFFLE) {
                 self.update_shuffled();
+            }
+            if changed.contains(PlaybackFields::POSITION) {
+                self.sync_seek(playback.state.position);
+            }
+            if changed.contains(PlaybackFields::VOLUME) {
+                self.widget.set_volume(playback.state.volume);
+            }
+            if changed.intersects(
+                PlaybackFields::TRACK | PlaybackFields::REPEAT | PlaybackFields::SHUFFLE,
+            ) {
                 self.update_queue_bar();
             }
-            AppEvent::PlaybackEvent(PlaybackEvent::TrackChanged(_)) => {
-                self.update_playing();
-                self.update_current_info();
-                self.update_queue_bar();
+        }
+        match event {
+            _ if event.queue_changed() => self.update_queue_bar(),
+            AppEvent::Core(Event::Selection(selection)) if selection.mode_changed() => {
+                self.widget.set_seekbar_visible(!selection.active);
             }
-            AppEvent::PlaybackEvent(PlaybackEvent::PlaybackStopped) => {
-                self.update_playing();
-                self.update_current_info();
-                self.update_queue_bar();
-            }
-            AppEvent::PlaybackEvent(PlaybackEvent::PlaylistChanged) => {
-                self.update_queue_bar();
-            }
-            AppEvent::PlaybackEvent(PlaybackEvent::SeekSynced(pos))
-            | AppEvent::PlaybackEvent(PlaybackEvent::TrackSeeked(pos)) => {
-                self.sync_seek(*pos);
-            }
-            AppEvent::SelectionEvent(SelectionEvent::SelectionModeChanged(active)) => {
-                self.widget.set_seekbar_visible(!active);
-            }
-            AppEvent::PlaybackEvent(PlaybackEvent::VolumeSet(value)) => {
-                self.widget.set_volume(*value)
-            }
-            AppEvent::ConnectionLostChanged(lost) => {
-                self.set_connection_lost(*lost);
+            AppEvent::Core(Event::Session(session))
+                if session.changed.contains(SessionFields::CONNECTION) =>
+            {
+                self.set_connection_lost(session.connection_lost);
             }
             _ => {}
         }

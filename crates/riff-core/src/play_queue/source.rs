@@ -1,24 +1,33 @@
-/// Where a list of tracks comes from.
-#[derive(Clone, Debug, PartialEq, Eq)]
+use riff_api::remote::RemoteContext;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SongsSource {
     Playlist(String),
     Album(String),
     Artist(String),
     SavedTracks,
-    /// Search results, by query.
     Search(String),
 }
 
 impl SongsSource {
-    pub fn has_spotify_uri(&self) -> bool {
-        matches!(self, Self::Playlist(_) | Self::Album(_))
+    pub fn remote_context(&self, user_id: Option<&str>) -> Option<RemoteContext> {
+        Some(match self {
+            Self::Playlist(id) => RemoteContext::Playlist(id.clone()),
+            Self::Album(id) => RemoteContext::Album(id.clone()),
+            Self::Artist(id) => RemoteContext::Artist(id.clone()),
+            Self::SavedTracks => RemoteContext::SavedTracks {
+                user_id: user_id?.to_string(),
+            },
+            Self::Search(_) => return None,
+        })
     }
 
-    pub fn spotify_uri(&self) -> Option<String> {
-        match self {
-            Self::Playlist(id) => Some(format!("spotify:playlist:{}", id)),
-            Self::Album(id) => Some(format!("spotify:album:{}", id)),
-            _ => None,
+    pub fn from_remote(context: &RemoteContext) -> Self {
+        match context {
+            RemoteContext::Playlist(id) => Self::Playlist(id.clone()),
+            RemoteContext::Album(id) => Self::Album(id.clone()),
+            RemoteContext::Artist(id) => Self::Artist(id.clone()),
+            RemoteContext::SavedTracks { .. } => Self::SavedTracks,
         }
     }
 
@@ -37,9 +46,31 @@ impl SongsSource {
     }
 }
 
-/// The next page to fetch.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PageRequest {
     pub offset: usize,
     pub batch_size: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_contexts_round_trip() {
+        for source in [
+            SongsSource::Playlist("p".into()),
+            SongsSource::Album("a".into()),
+            SongsSource::Artist("r".into()),
+            SongsSource::SavedTracks,
+        ] {
+            let context = source.remote_context(Some("me")).unwrap();
+            assert_eq!(SongsSource::from_remote(&context), source);
+        }
+        assert_eq!(SongsSource::SavedTracks.remote_context(None), None);
+        assert_eq!(
+            SongsSource::Search("q".into()).remote_context(Some("me")),
+            None
+        );
+    }
 }

@@ -7,8 +7,6 @@ use std::cell::{Cell, Ref, RefCell, RefMut};
 use super::support::*;
 use crate::app::models::*;
 
-// A struct to perform multiple mutations on a SongListModel
-// Eventually commit() must be called to send an update signal with merged affected ranges
 #[must_use]
 pub struct SongListModelPending<'a> {
     change: Option<ListRangeUpdate>,
@@ -56,7 +54,6 @@ impl<'a> SongListModelPending<'a> {
     }
 }
 
-// A GObject wrapper around the SongList
 glib::wrapper! {
     pub struct SongListModel(ObjectSubclass<imp::SongListModel>) @implements gio::ListModel;
 }
@@ -77,17 +74,6 @@ impl SongListModel {
     }
 
     fn notify_changes(&self, changes: impl IntoIterator<Item = ListRangeUpdate> + 'static) {
-        // items_changed MUST be emitted synchronously, immediately after the
-        // backing SongList mutates. GTK's ListModel contract requires that the
-        // model never be observable in a state where n_items() disagrees with
-        // what GTK's item trackers expect. Deferring this signal (e.g. via
-        // idle_add) let the frame clock process crossing/redraw events against a
-        // torn model, causing a SIGSEGV in gtk_list_item_manager_ensure_items.
-        //
-        // Emitting synchronously is safe here even though we are inside
-        // AppState's borrow_mut, because the ListView bind callback is now
-        // self-contained: it reads only the SongModel handed to it by GTK and
-        // never calls back into AppModel::get_state(). See Playlist::new.
         for ListRangeUpdate(a, b, c) in changes.into_iter() {
             debug!("pos {}, removed {}, added {}", a, b, c);
             self.items_changed(a as u32, b as u32, c as u32);
@@ -158,6 +144,15 @@ impl SongListModel {
     pub fn append(&mut self, songs: Vec<Track>) -> SongListModelPending {
         let range = self.inner_mut().append(songs);
         SongListModelPending::new(Some(range), self)
+    }
+
+    pub fn sync_pages(&mut self, pages: &riff_core::screens::TrackPages) -> bool {
+        self.sync(&pages.items, pages.total, pages.is_complete())
+    }
+
+    pub fn sync(&mut self, tracks: &[Track], total: Option<usize>, complete: bool) -> bool {
+        let change = self.inner_mut().sync(tracks, total, complete);
+        SongListModelPending::new(change, self).commit()
     }
 
     pub fn replace_models(&mut self, songs: Vec<SongModel>) -> SongListModelPending {

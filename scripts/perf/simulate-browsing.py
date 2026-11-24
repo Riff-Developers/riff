@@ -117,7 +117,7 @@ class Riff:
         sections, heading = {}, None
         for node in walk(self.app):
             role = node.get_role_name()
-            if role == "label" and node.get_name() in (ARTISTS, PLAYLISTS):
+            if role == "label" and node.get_name() in HEADINGS:
                 heading = node.get_name()
             elif role == "table":
                 cells = [node.get_child_at_index(i) for i in range(node.get_child_count())]
@@ -129,40 +129,34 @@ class Riff:
         """The search page's text entry, or None when another page is showing."""
         return next((n for n in walk(self.app) if n.get_role_name() == "entry" and n.get_editable_text_iface()), None)
 
-    def wait_for_cards(self, heading):
-        """Wait until the cards under `heading` have loaded and stopped changing."""
-        deadline = time.monotonic() + RESULTS_TIMEOUT
-        previous = None
-        while time.monotonic() < deadline:
-            time.sleep(1)
-            names = [c.get_name() for c in self.sections().get(heading, [])]
-            if names and names == previous:
-                return True
-            previous = names
-        return False
+    def cards(self):
+        """The names of every card on screen, by section."""
+        return {heading: [c.get_name() for c in cards] for heading, cards in self.sections().items()}
 
-    def search(self, query, scope):
-        """Search for `query`, then narrow the results to the `scope` section."""
+    def search(self, query):
+        """Search for `query` and wait for its results.
+
+        Returns the sections of the results, or None when nothing came up.
+        """
         # Start from the home screen so the navigation stack doesn't keep growing
         self.app_action("nav_albums")
         self.app_action("search")
         entry = self.search_entry()
         if not entry:
             sys.exit("Could not find the search entry.")
+        before = self.cards()
         entry.get_editable_text_iface().set_text_contents(query)
-        if not self.wait_for_cards(scope):
-            return False
-
-        # Each section heading is followed by its "Show All" button
-        after_heading = False
-        for node in walk(self.app):
-            role = node.get_role_name()
-            if role == "label" and node.get_name() == scope:
-                after_heading = True
-            elif after_heading and role == "button" and node.get_name() == SHOW_ALL:
-                do_action(node, "click")
-                return self.wait_for_cards(None)
-        return False
+        deadline = time.monotonic() + RESULTS_TIMEOUT
+        previous = None
+        while time.monotonic() < deadline:
+            time.sleep(1)
+            cards = self.cards()
+            if any(cards.values()) and cards == previous and cards != before:
+                if not any(heading in cards for heading in HEADINGS):
+                    sys.exit('The search page has a filter set; choose "All" in its filter menu and run again.')
+                return cards
+            previous = cards
+        return None
 
     def scroll_down(self):
         """Scroll the current page to the bottom, a few times so more content can load."""
@@ -178,8 +172,8 @@ class Riff:
                 return
             time.sleep(SCROLL_PAUSE)
 
-    def open_card(self, index):
-        """Open the search result at `index` and scroll the page it leads to.
+    def open_card(self, heading, index):
+        """Open the result at `index` under `heading` and scroll the page it leads to.
 
         Returns the result's name, or None if there is no such result.
         """
@@ -187,7 +181,7 @@ class Riff:
             print("  no longer on the search results, moving on")
             return None
         for _ in range(ATTEMPTS):
-            cards = self.sections().get(None, [])
+            cards = self.sections().get(heading, [])
             if index >= len(cards):
                 return None
             name = cards[index].get_name()
@@ -202,21 +196,20 @@ class Riff:
         sys.exit(f"Card '{name}' has no '{CARD_ACTION}' action; this Riff build is too old.")
 
     def back(self):
-        self.app_action("nav_pop")
+        self.app_action("nav_back")
 
 
 def browse(riff, genre, count):
-    for scope in (PLAYLISTS, ARTISTS):
-        print(f"Searching {scope.lower()} for '{genre}'")
-        if not riff.search(genre, scope):
-            print("  no results, skipping")
-            continue
-        riff.scroll_down()
+    print(f"Searching for '{genre}'")
+    if riff.search(genre) is None:
+        print("  no results, skipping")
+        return
+    for heading in (PLAYLISTS, ARTISTS):
         for i in range(count):
-            name = riff.open_card(i)
+            name = riff.open_card(heading, i)
             if name is None:
                 break
-            print(f"  {name}")
+            print(f"  {heading.lower()}: {name}")
             riff.back()
 
 

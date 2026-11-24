@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use super::QueuePageWidget;
 use crate::app::components::{Component, EventListener, QueueList, QueueListModel};
-use crate::app::state::PlaybackEvent;
+use crate::app::state::PlaybackFields;
 use crate::app::{AppEvent, AppModel, Dispatcher};
 
 pub struct QueuePage {
@@ -67,15 +67,11 @@ impl Component for QueuePage {
 impl EventListener for QueuePage {
     fn on_event(&mut self, event: &AppEvent) {
         self.queue_list.on_event(event);
-        if let AppEvent::SelectionEvent(_) = event {
+        if event.selection().is_some() {
             self.update_selection();
         }
-        if let AppEvent::PlaybackEvent(
-            PlaybackEvent::TrackChanged(_)
-            | PlaybackEvent::PlaybackStopped
-            | PlaybackEvent::PlaylistChanged
-            | PlaybackEvent::SourceChanged,
-        ) = event
+        if event.queue_changed()
+            || event.playback_changed(PlaybackFields::TRACK | PlaybackFields::CONTEXT)
         {
             self.widget
                 .set_queue_empty(!self.queue_list.model().has_queue());

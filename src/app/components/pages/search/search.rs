@@ -12,24 +12,21 @@ use crate::app::components::{
     EventListener, ImageShape, PageHeader, SortOrder, TrackList, CLAMP_MAX_SIZE,
 };
 use crate::app::models::{CardModel, SearchType, Track};
-use crate::app::state::{AppEvent, BrowserEvent};
+use crate::app::state::{
+    AppEvent, PageFields, PageLoaded, Route, SearchFields, ViewPreferencesChanged,
+};
 use crate::app::{Dispatcher, ListStore};
 
 use super::{SearchResultsModel, SearchScopeCardsModel, SearchScopeTracksModel};
 
-/// Stack page names for the different result presentations.
 const PAGE_ALL: &str = "all";
 const PAGE_CARDS: &str = "cards";
 const PAGE_TRACKS: &str = "tracks";
 
-/// Debounce (ms) between the last keystroke and firing a search.
 const SEARCH_DEBOUNCE_MS: u32 = 600;
 
-/// Rows shown per section in the combined view before "Show All".
 const SECTION_MAX_ROWS: u32 = 2;
-/// Bottom margin (px) below each section's card grid.
 const SECTION_BOTTOM_MARGIN: i32 = 32;
-/// Spacing (px) between sections in the combined view.
 const SECTION_SPACING: i32 = 16;
 
 mod imp {
@@ -72,7 +69,6 @@ mod imp {
         #[template_child]
         pub results_box: TemplateChild<gtk::Box>,
 
-        /// Guard flag to prevent re-entrant filter toggle signals.
         pub filter_updating: Cell<bool>,
     }
 
@@ -140,10 +136,10 @@ impl SearchResultsWidget {
     fn filter_buttons(&self) -> [(gtk::ToggleButton, SearchType); 4] {
         let imp = self.imp();
         [
-            ((*imp.filter_artists).clone(), SearchType::Artists),
-            ((*imp.filter_albums).clone(), SearchType::Albums),
-            ((*imp.filter_playlists).clone(), SearchType::Playlists),
-            ((*imp.filter_songs).clone(), SearchType::Tracks),
+            ((*imp.filter_artists).clone(), SearchType::Artist),
+            ((*imp.filter_albums).clone(), SearchType::Album),
+            ((*imp.filter_playlists).clone(), SearchType::Playlist),
+            ((*imp.filter_songs).clone(), SearchType::Track),
         ]
     }
 
@@ -167,7 +163,6 @@ impl SearchResultsWidget {
                     }
                     widget.imp().filter_updating.set(true);
                     if btn.is_active() {
-                        // Deactivate all other buttons.
                         for (other, _) in widget.filter_buttons() {
                             if &other != btn {
                                 other.set_active(false);
@@ -176,7 +171,6 @@ impl SearchResultsWidget {
                         widget.imp().filter_popover.popdown();
                         f(Some(filter));
                     } else {
-                        // Toggled off - go back to "All" view.
                         widget.imp().filter_popover.popdown();
                         f(None);
                     }
@@ -193,7 +187,6 @@ impl SearchResultsWidget {
         for (button, this_filter) in self.filter_buttons() {
             button.set_active(filter == Some(this_filter));
         }
-        // Highlight the filter button itself when a scope is active.
         if filter.is_some() {
             imp.filter_button.add_css_class("accent");
         } else {
@@ -216,7 +209,6 @@ impl SearchResultsWidget {
     }
 }
 
-/// A simple model adapter that allows CardList to display a search section.
 struct SearchSectionModel {
     store: ListStore<CardModel>,
     shape: ImageShape,
@@ -341,12 +333,10 @@ impl SearchResults {
         let model = Rc::new(model);
         let widget = SearchResultsWidget::new();
 
-        // Move the search bar into the shared header as this screen's title.
         let search_bar = widget.imp().search_bar.get();
         widget.remove(&search_bar);
         header.set_title_widget(&search_bar);
 
-        // --- Combined ("all") view: Tracks / Artists / Albums sections ---
         let all_box = gtk::Box::new(gtk::Orientation::Vertical, SECTION_SPACING);
 
         let section_api_service = model.app_model().api();
@@ -354,8 +344,6 @@ impl SearchResults {
         let track_section = Rc::new(SearchSectionModel {
             store: ListStore::new(),
             shape: ImageShape::Square,
-            // Tracks need the full Track, so activation is wired
-            // separately via connect_child_activated below rather than by id.
             on_activated: Box::new(|_| {}),
             api_service: section_api_service.clone(),
         });
@@ -393,14 +381,13 @@ impl SearchResults {
         let track_card_list = build_section(
             &all_box,
             &gettextrs::gettext("Tracks"),
-            SearchType::Tracks,
+            SearchType::Track,
             &track_section,
             &model,
             layout.get(),
             size.get(),
         );
 
-        // Override track activation to pass the full Track.
         let track_section_clone = Rc::clone(&track_section);
         let model_weak = Rc::downgrade(&model);
         track_card_list
@@ -430,7 +417,7 @@ impl SearchResults {
         let artist_card_list = build_section(
             &all_box,
             &gettextrs::gettext("Artists"),
-            SearchType::Artists,
+            SearchType::Artist,
             &artist_section,
             &model,
             layout.get(),
@@ -440,7 +427,7 @@ impl SearchResults {
         let album_card_list = build_section(
             &all_box,
             &gettextrs::gettext("Albums"),
-            SearchType::Albums,
+            SearchType::Album,
             &album_section,
             &model,
             layout.get(),
@@ -450,46 +437,44 @@ impl SearchResults {
         let playlist_card_list = build_section(
             &all_box,
             &gettextrs::gettext("Playlists"),
-            SearchType::Playlists,
+            SearchType::Playlist,
             &playlist_section,
             &model,
             layout.get(),
             size.get(),
         );
 
-        // --- Scoped card view (artists / albums / playlists) ---
         let scope_cards_model = Rc::new(SearchScopeCardsModel::new(
             model.app_model(),
             dispatcher.clone(),
+            model.screen(),
         ));
         let scope_card_list = Rc::new(CardList::new());
         scope_card_list.bind(&scope_cards_model, layout.get(), size.get());
 
-        // --- Scoped track view (songs) ---
         let scope_tracks_model = Rc::new(SearchScopeTracksModel::new(
             model.app_model(),
             dispatcher.clone(),
+            model.screen(),
+            model.liked(),
         ));
         let track_listview =
             gtk::ListView::new(None::<gtk::NoSelection>, None::<gtk::ListItemFactory>);
         let scope_track_list =
             TrackList::new(track_listview.clone(), Rc::clone(&scope_tracks_model));
 
-        // Constrain the track list width to match the Now Playing page.
         track_listview.set_hexpand(true);
         let tracks_clamp = libadwaita::Clamp::new();
         tracks_clamp.set_maximum_size(CLAMP_MAX_SIZE);
         tracks_clamp.set_tightening_threshold(CLAMP_MAX_SIZE);
         tracks_clamp.set_child(Some(&track_listview));
 
-        // Constrain the combined view width to match the Now Playing / track views.
         all_box.set_hexpand(true);
         let all_clamp = libadwaita::Clamp::new();
         all_clamp.set_maximum_size(CLAMP_MAX_SIZE);
         all_clamp.set_tightening_threshold(CLAMP_MAX_SIZE);
         all_clamp.set_child(Some(&all_box));
 
-        // --- Stack that swaps between the three presentations ---
         let content_stack = gtk::Stack::new();
         content_stack.set_vexpand(true);
         content_stack.add_named(&all_clamp, Some(PAGE_ALL));
@@ -500,7 +485,6 @@ impl SearchResults {
 
         scope_track_list.connect_scrolling();
 
-        // Card view menu (layout/size/sort controls) in the headerbar.
         let current_sort = Rc::new(Cell::new(SortOrder::RecentlyAdded));
         let view_menu = CardViewMenu::new(
             "search".to_string(),
@@ -527,7 +511,6 @@ impl SearchResults {
             move |filter| model.set_filter(filter)
         ));
 
-        // Infinite scroll for the scoped views.
         widget.connect_edge_reached(clone!(
             #[weak]
             model,
@@ -536,7 +519,7 @@ impl SearchResults {
             #[weak]
             scope_tracks_model,
             move || match model.get_filter() {
-                Some(SearchType::Tracks) => scope_tracks_model.load_more(),
+                Some(SearchType::Track) => scope_tracks_model.load_more(),
                 Some(_) => scope_cards_model.load_more(),
                 None => {}
             }
@@ -612,7 +595,7 @@ impl SearchResults {
     fn trigger_search(&self) {
         match self.model.get_filter() {
             None => self.show_all_placeholders(),
-            Some(SearchType::Tracks) => {}
+            Some(SearchType::Track) => {}
             Some(_) => self.scope_card_list.show_placeholders(),
         }
         self.debouncer.debounce(
@@ -630,16 +613,14 @@ impl SearchResults {
         let filter = self.model.get_filter();
         self.widget.set_active_filter(filter);
 
-        // Hide the card style/size button on the tracks page since it's a list.
         self.view_menu
             .widget()
-            .set_visible(!matches!(filter, Some(SearchType::Tracks)));
+            .set_visible(!matches!(filter, Some(SearchType::Track)));
 
         match filter {
             None => self.set_visible_page(PAGE_ALL),
-            Some(SearchType::Tracks) => self.set_visible_page(PAGE_TRACKS),
+            Some(SearchType::Track) => self.set_visible_page(PAGE_TRACKS),
             Some(_) => {
-                // Rebind so the correct image shape (round for artists) applies.
                 self.scope_card_list.bind(
                     &self.scope_cards_model,
                     self.layout.get(),
@@ -659,7 +640,7 @@ impl SearchResults {
     }
 
     fn on_scope_updated(&self) {
-        if !matches!(self.model.get_filter(), Some(SearchType::Tracks)) {
+        if !matches!(self.model.get_filter(), Some(SearchType::Track)) {
             self.scope_card_list.remove_placeholders();
         }
     }
@@ -683,41 +664,52 @@ impl Component for SearchResults {
 
 impl EventListener for SearchResults {
     fn on_event(&mut self, app_event: &AppEvent) {
-        match app_event {
-            AppEvent::BrowserEvent(BrowserEvent::SearchUpdated) => {
+        self.model.screen().apply(app_event);
+        if let Some(search) = app_event.search() {
+            self.scope_cards_model.sync();
+            if search.changed.contains(SearchFields::QUERY) {
                 self.get_root_widget().grab_focus();
                 self.trigger_search();
             }
-            AppEvent::BrowserEvent(BrowserEvent::SearchFilterChanged) => {
+            if search.changed.contains(SearchFields::FILTER) {
                 self.on_filter_changed();
             }
-            AppEvent::BrowserEvent(BrowserEvent::SearchResultsUpdated) => {
+        }
+        if let Some(loaded) = app_event.page_loaded(&Route::Search) {
+            if loaded.contains(PageFields::INFO) {
                 self.update_results();
             }
-            AppEvent::BrowserEvent(BrowserEvent::SearchScopeUpdated(_)) => {
+            if loaded.contains(PageFields::CARDS) {
+                self.scope_cards_model.sync();
                 self.on_scope_updated();
             }
-            AppEvent::BrowserEvent(BrowserEvent::AlbumDetailsLoaded(id)) => {
+        }
+        if let AppEvent::PageLoaded(PageLoaded {
+            route: Route::Album(id),
+            changed,
+        }) = app_event
+        {
+            if changed.contains(PageFields::TRACKS) {
                 self.model.on_album_loaded(id);
             }
-            AppEvent::BrowserEvent(
-                BrowserEvent::CardLayoutChanged(_) | BrowserEvent::CardSizeChanged(_),
-            ) => {
-                let l = self.layout.get();
-                let s = self.size.get();
-                for cl in [
-                    &self.track_card_list,
-                    &self.artist_card_list,
-                    &self.album_card_list,
-                    &self.playlist_card_list,
-                    &self.scope_card_list,
-                ] {
-                    cl.update_layout(l);
-                    cl.update_size(s);
-                }
-                self.view_menu.sync(l);
+        }
+        if let AppEvent::ViewPreferences(
+            ViewPreferencesChanged::CardLayout(_) | ViewPreferencesChanged::CardSize(_),
+        ) = app_event
+        {
+            let l = self.layout.get();
+            let s = self.size.get();
+            for cl in [
+                &self.track_card_list,
+                &self.artist_card_list,
+                &self.album_card_list,
+                &self.playlist_card_list,
+                &self.scope_card_list,
+            ] {
+                cl.update_layout(l);
+                cl.update_size(s);
             }
-            _ => {}
+            self.view_menu.sync(l);
         }
         self.broadcast_event(app_event);
     }
