@@ -79,6 +79,9 @@ mod imp {
         pub subtitle_label: TemplateChild<gtk::Label>,
 
         #[template_child]
+        pub release_year: TemplateChild<gtk::Label>,
+
+        #[template_child]
         pub cover: TemplateChild<gtk::Overlay>,
 
         #[template_child]
@@ -103,6 +106,7 @@ mod imp {
                 label_box: Default::default(),
                 title_label: Default::default(),
                 subtitle_label: Default::default(),
+                release_year: Default::default(),
                 cover: Default::default(),
                 cover_image: Default::default(),
                 playing_indicator: Default::default(),
@@ -357,11 +361,13 @@ impl CardWidget {
                 imp.label_box.set_visible(true);
                 imp.title_label.set_halign(gtk::Align::Start);
                 imp.subtitle_label.set_halign(gtk::Align::Start);
+                imp.release_year.set_halign(gtk::Align::Start);
             }
             _ => {
                 imp.label_box.set_visible(true);
                 imp.title_label.set_halign(gtk::Align::Fill);
                 imp.subtitle_label.set_halign(gtk::Align::Fill);
+                imp.release_year.set_halign(gtk::Align::Fill);
             }
         }
         self.queue_resize();
@@ -391,6 +397,7 @@ impl CardWidget {
             let title = model.title();
             let subtitle = model.subtitle();
             let position = model.insertion_position();
+            let release_year = model.release_year();
             let is_visible = position <= VISIBLE_THRESHOLD as i64;
             // Captured now, since the off-screen branch defers to an idle
             // callback by which point the user may have navigated away.
@@ -409,6 +416,10 @@ impl CardWidget {
                     this.imp().title_label.set_label(&title);
                     this.imp().subtitle_label.set_label(&subtitle);
                     this.imp().subtitle_label.set_visible(!subtitle.is_empty());
+                    this.imp().release_year.set_label(&release_year);
+                    this.imp()
+                        .release_year
+                        .set_visible(!release_year.is_empty());
                     this.set_tooltip_text(Some(&title));
                     this.set_loaded();
                 }
